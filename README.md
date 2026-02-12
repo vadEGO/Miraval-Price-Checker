@@ -50,6 +50,7 @@ cp config.example.json config.json
    - Set `worksheet_name`: Name of the worksheet tab (default: "Wine Prices")
    - Configure `wine_sites`: List of websites to search
    - (Optional) Set `tracked_wines`: wine names used by the UI picker and monitoring endpoint
+   - (Optional) Set `competitor_wines`: benchmark labels (e.g. Minuty M Provence Rosé 750mL)
 
 Example `config.json`:
 ```json
@@ -61,6 +62,11 @@ Example `config.json`:
     "Miraval Blanc",
     "Studio Rosé by Miraval",
     "Famille Perrin Côtes-du-Rhône Réserve Rouge"
+  ],
+  "competitor_wines": [
+    "Minuty M Provence Rosé 750mL",
+    "Whispering Angel Rosé 750mL",
+    "AIX Rosé 750mL"
   ],
   "wine_sites": [
     "danmurphys.com.au",
@@ -124,7 +130,7 @@ Run all tracked wines in one request and write results to Sheets:
 ```bash
 curl -X POST http://localhost:5050/api/run-monitoring \
   -H 'Content-Type: application/json' \
-  -d '{"add_to_sheet": true}'
+  -d '{"add_to_sheet": true, "include_competitors": true}'
 ```
 
 Use cron (macOS/Linux) or Task Scheduler (Windows) to call this endpoint daily.

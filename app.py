@@ -62,6 +62,14 @@ DEFAULT_WINE_CATALOG = [
     "Studio Rosé by Miraval",
     "Fleur de Miraval",
 ]
+DEFAULT_COMPETITOR_WINES = [
+    "Minuty M Provence Rosé 750mL",
+    "Whispering Angel Rosé 750mL",
+    "Château d'Esclans Rock Angel Rosé 750mL",
+    "AIX Rosé 750mL",
+    "Maison Saint Aix Provence Rosé 750mL",
+    "Mirabeau Classic Rosé 750mL",
+]
 
 
 # =====================================================================
@@ -123,22 +131,26 @@ def _write_config(cfg):
         json.dump(cfg, f, indent=2)
 
 
+def _clean_wine_list(values):
+    if not isinstance(values, list):
+        return []
+    cleaned = []
+    seen = set()
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        wine = item.strip()
+        if wine and wine.lower() not in seen:
+            seen.add(wine.lower())
+            cleaned.append(wine)
+    return cleaned
+
+
 def _configured_wine_catalog():
     cfg = _read_config()
-    wines = cfg.get('tracked_wines')
-    if isinstance(wines, list):
-        cleaned = []
-        seen = set()
-        for item in wines:
-            if not isinstance(item, str):
-                continue
-            wine = item.strip()
-            if wine and wine.lower() not in seen:
-                seen.add(wine.lower())
-                cleaned.append(wine)
-        if cleaned:
-            return cleaned
-    return DEFAULT_WINE_CATALOG
+    tracked = _clean_wine_list(cfg.get('tracked_wines')) or DEFAULT_WINE_CATALOG
+    competitors = _clean_wine_list(cfg.get('competitor_wines')) or DEFAULT_COMPETITOR_WINES
+    return tracked, competitors
 
 
 def _init_sheets_writer(creds=None):
@@ -453,8 +465,21 @@ def add_to_sheet():
 
 @app.route('/api/catalog', methods=['GET'])
 def get_catalog():
-    wines = _configured_wine_catalog()
-    return jsonify({'success': True, 'wines': wines, 'count': len(wines)})
+    tracked_wines, competitor_wines = _configured_wine_catalog()
+    combined = []
+    seen = set()
+    for wine in tracked_wines + competitor_wines:
+        k = wine.lower()
+        if k not in seen:
+            seen.add(k)
+            combined.append(wine)
+    return jsonify({
+        'success': True,
+        'tracked_wines': tracked_wines,
+        'competitor_wines': competitor_wines,
+        'wines': combined,
+        'count': len(combined),
+    })
 
 
 @app.route('/api/run-monitoring', methods=['POST'])
@@ -469,8 +494,10 @@ def run_monitoring():
 
         payload = request.get_json(silent=True) or {}
         wines = payload.get('wine_names')
+        include_competitors = bool(payload.get('include_competitors', True))
         if not isinstance(wines, list) or not wines:
-            wines = _configured_wine_catalog()
+            tracked_wines, competitor_wines = _configured_wine_catalog()
+            wines = tracked_wines + (competitor_wines if include_competitors else [])
 
         do_write = bool(payload.get('add_to_sheet', True))
         results = []

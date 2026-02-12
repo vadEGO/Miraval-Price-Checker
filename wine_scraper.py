@@ -568,7 +568,7 @@ class GoogleSheetsWriter:
             'Scraped At', 'Source URL', 'In Stock',
         ])
         # Auto-bold header row and freeze it
-        self.worksheet.format('A1:E1', {'textFormat': {'bold': True}})
+        self.worksheet.format('A1:H1', {'textFormat': {'bold': True}})
         self.worksheet.freeze(rows=1)
         return {
             'id': spreadsheet.id,
