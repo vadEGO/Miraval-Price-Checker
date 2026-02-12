@@ -9,6 +9,7 @@ Uses a combination of:
 """
 
 import json
+import os
 import sys
 import re
 import time
@@ -228,11 +229,21 @@ class WineScraper:
 
                         display_name = f"{name} {size}".strip() if size else name
                         price_str = f"${price:.2f}" if price else "N/A"
+                        product_url = (
+                            product.get('ProductUrl')
+                            or product.get('Url')
+                            or product.get('PdpUrl')
+                            or f"https://www.bws.com.au/search?q={quote_plus(wine_name)}"
+                        )
+                        if isinstance(product_url, str) and product_url.startswith('/'):
+                            product_url = f"https://www.bws.com.au{product_url}"
 
                         info = {
                             'wine': display_name,
                             'price': price_str,
                             'location': location,
+                            'source_url': product_url,
+                            'in_stock': bool(available),
                         }
 
                         # Add sale info
@@ -392,7 +403,18 @@ class WineScraper:
             if formatted_price == "N/A" and wine_search_term:
                 return None  # Skip priceless results when we have a specific search
 
-            return {'wine': name[:200], 'price': formatted_price, 'location': location}
+            link = product_element.find('a', href=True)
+            source_url = link['href'].strip() if link and link.get('href') else ''
+            if source_url.startswith('//'):
+                source_url = f"https:{source_url}"
+
+            return {
+                'wine': name[:200],
+                'price': formatted_price,
+                'location': location,
+                'source_url': source_url,
+                'in_stock': formatted_price != 'N/A',
+            }
 
         except Exception:
             return None
@@ -422,6 +444,11 @@ class WineScraper:
             seen.add(eid)
             info = self._extract_product_info(elem, location, wine_name)
             if info and info not in results:
+                if not info.get('source_url'):
+                    info['source_url'] = url
+                elif isinstance(info['source_url'], str) and info['source_url'].startswith('/'):
+                    domain = '/'.join(url.split('/')[:3])
+                    info['source_url'] = f"{domain}{info['source_url']}"
                 results.append(info)
                 if len(results) >= 5:
                     break
@@ -524,7 +551,10 @@ class GoogleSheetsWriter:
         except gspread.exceptions.WorksheetNotFound:
             self.worksheet = self.spreadsheet.add_worksheet(
                 title=worksheet_name, rows=1000, cols=10)
-            self.worksheet.append_row(['Search Term', 'Wine', 'Price', 'Location', 'Date'])
+            self.worksheet.append_row([
+                'Search Term', 'Wine', 'Price', 'Location', 'Date',
+                'Scraped At', 'Source URL', 'In Stock',
+            ])
 
     def create_spreadsheet(self, title: str = "Wine Prices – Miraval Price Checker"):
         """Create a new spreadsheet and set it as active. Returns metadata dict."""
@@ -533,7 +563,10 @@ class GoogleSheetsWriter:
         self.sheet_id = spreadsheet.id
         self.worksheet = spreadsheet.sheet1
         self.worksheet.update_title("Wine Prices")
-        self.worksheet.append_row(['Search Term', 'Wine', 'Price', 'Location', 'Date'])
+        self.worksheet.append_row([
+            'Search Term', 'Wine', 'Price', 'Location', 'Date',
+            'Scraped At', 'Source URL', 'In Stock',
+        ])
         # Auto-bold header row and freeze it
         self.worksheet.format('A1:E1', {'textFormat': {'bold': True}})
         self.worksheet.freeze(rows=1)
@@ -548,9 +581,20 @@ class GoogleSheetsWriter:
             print("No results to add.")
             return
         from datetime import datetime
-        today = datetime.now().strftime('%Y-%m-%d')
+        now = datetime.now()
+        today = now.strftime('%Y-%m-%d')
+        scraped_at = now.strftime('%Y-%m-%d %H:%M:%S')
         rows = [
-            [r.get('query', ''), r['wine'], r['price'], r['location'], today]
+            [
+                r.get('query', ''),
+                r['wine'],
+                r['price'],
+                r['location'],
+                today,
+                r.get('scraped_at', scraped_at),
+                r.get('source_url', ''),
+                'Yes' if r.get('in_stock', True) else 'No',
+            ]
             for r in results
         ]
         self.worksheet.append_rows(rows)

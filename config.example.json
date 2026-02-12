@@ -1,6 +1,12 @@
 {
   "google_sheet_id": "YOUR_GOOGLE_SHEET_ID",
   "worksheet_name": "Wine Prices",
+  "tracked_wines": [
+    "Miraval Rosé",
+    "Miraval Blanc",
+    "Studio Rosé by Miraval",
+    "Famille Perrin Côtes-du-Rhône Réserve Rouge"
+  ],
   "wine_sites": [
     "danmurphys.com.au",
     "bws.com.au",

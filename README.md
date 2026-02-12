@@ -49,12 +49,19 @@ cp config.example.json config.json
    - Set `google_sheet_id`: Found in your Google Sheet URL (between `/d/` and `/edit`)
    - Set `worksheet_name`: Name of the worksheet tab (default: "Wine Prices")
    - Configure `wine_sites`: List of websites to search
+   - (Optional) Set `tracked_wines`: wine names used by the UI picker and monitoring endpoint
 
 Example `config.json`:
 ```json
 {
   "google_sheet_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
   "worksheet_name": "Wine Prices",
+  "tracked_wines": [
+    "Miraval Rosé",
+    "Miraval Blanc",
+    "Studio Rosé by Miraval",
+    "Famille Perrin Côtes-du-Rhône Réserve Rouge"
+  ],
   "wine_sites": [
     "danmurphys.com.au",
     "bws.com.au",
@@ -75,7 +82,7 @@ python3 app.py
 
 2. Open your browser and navigate to:
 ```
-http://localhost:5000
+http://localhost:5050
 ```
 
 3. Enter a wine name in the search box and click "Search"
@@ -108,6 +115,19 @@ python3 wine_scraper.py
 2. Extracts wine names, prices, and retailer locations
 3. Formats the data and adds it to your Google Sheet
 4. Results are appended to the sheet with columns: **Wine**, **Price**, **Location**
+5. Rows also include **Scraped At**, **Source URL**, and **In Stock** for better history tracking.
+
+### Scheduled Monitoring (Recommended)
+
+Run all tracked wines in one request and write results to Sheets:
+
+```bash
+curl -X POST http://localhost:5050/api/run-monitoring \
+  -H 'Content-Type: application/json' \
+  -d '{"add_to_sheet": true}'
+```
+
+Use cron (macOS/Linux) or Task Scheduler (Windows) to call this endpoint daily.
 
 ## Troubleshooting
 
