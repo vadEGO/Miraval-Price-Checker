@@ -1,0 +1,17 @@
+{
+  "google_sheet_id": "YOUR_GOOGLE_SHEET_ID",
+  "worksheet_name": "Wine Prices",
+  "wine_sites": [
+    "danmurphys.com.au",
+    "bws.com.au",
+    "liquorland.com.au",
+    "firstchoice.com.au",
+    "kentstreetcellars.com.au",
+    "nicks.com.au",
+    "senseoftaste.com.au",
+    "princewinestore.com.au",
+    "differentdrop.com",
+    "cellarbrations.com.au",
+    "grandcruwineshop.com.au"
+  ]
+}

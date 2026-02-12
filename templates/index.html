@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Miraval Price Checker</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+
+        .container { max-width: 1200px; margin: 0 auto; }
+
+        .header { text-align: center; color: white; margin-bottom: 40px; }
+        .header h1 { font-size: 2.5rem; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,.2); }
+        .header p { font-size: 1.1rem; opacity: .9; }
+
+        .card {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(0,0,0,.1);
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        /* ── Status bar ────────────────────────────────────────── */
+        .status-section { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+        .status-item { display: flex; align-items: center; font-size: .9rem; }
+        .status-indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
+        .status-indicator.ready { background: #38ef7d; }
+        .status-indicator.not-ready { background: #ff6b6b; }
+
+        /* ── Google Sheets panel ───────────────────────────────── */
+        .sheets-panel {
+            border: 1px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 24px;
+            background: #fafbff;
+        }
+        .sheets-panel h3 { font-size: 1rem; margin-bottom: 12px; }
+        .sheets-panel .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .sheets-panel .connected-info {
+            display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+            font-size: .92rem;
+        }
+        .sheets-panel .connected-info a { color: #667eea; text-decoration: none; font-weight: 600; }
+        .sheets-panel .connected-info a:hover { text-decoration: underline; }
+
+        .btn-google {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 10px 18px;
+            border: 1px solid #dadce0;
+            border-radius: 8px;
+            background: #fff;
+            font-size: .9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: box-shadow .2s;
+        }
+        .btn-google:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+        .btn-google svg { width: 18px; height: 18px; }
+
+        .btn-sm {
+            padding: 8px 14px; border: 1px solid #dadce0; border-radius: 8px;
+            background: #fff; font-size: .85rem; cursor: pointer; transition: background .2s;
+        }
+        .btn-sm:hover { background: #f0f0f0; }
+        .btn-sm.danger { color: #c0392b; border-color: #e6b3ae; }
+        .btn-sm.danger:hover { background: #fdecea; }
+        .btn-sm.primary { background: linear-gradient(135deg,#667eea,#764ba2); color: #fff; border: none; }
+        .btn-sm.primary:hover { opacity: .9; }
+
+        .setup-instructions {
+            margin-top: 12px; padding: 14px; background: #fff8e1;
+            border: 1px solid #ffe082; border-radius: 8px; font-size: .85rem; line-height: 1.6;
+        }
+        .setup-instructions ol { margin-left: 18px; }
+        .setup-instructions code { background: #f5f5f5; padding: 2px 6px; border-radius: 4px; font-size: .82rem; }
+
+        /* ── Picker ────────────────────────────────────────────── */
+        .search-section { margin-bottom: 30px; }
+        .search-form { display: flex; gap: 15px; margin-bottom: 20px; }
+        .picker-container { position: relative; flex: 1; }
+        .picker-trigger {
+            width: 100%; padding: 15px 20px;
+            border: 2px solid #e0e0e0; border-radius: 10px;
+            background: #fff; font-size: 1rem; text-align: left;
+            cursor: pointer; transition: border-color .2s;
+        }
+        .picker-trigger:focus { outline: none; border-color: #667eea; }
+        .picker-dropdown {
+            position: absolute; top: calc(100% + 8px); left: 0; right: 0;
+            max-height: 360px; background: #fff; border: 1px solid #e0e0e0;
+            border-radius: 10px; box-shadow: 0 12px 30px rgba(0,0,0,.12);
+            padding: 10px; z-index: 20; display: none;
+        }
+        .picker-dropdown.open { display: block; }
+        .picker-search { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 10px; }
+        .picker-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+        .picker-action-btn { border: 1px solid #ddd; background: #f8f9fa; border-radius: 8px; padding: 6px 10px; font-size: .8rem; cursor: pointer; }
+        .picker-options { max-height: 230px; overflow-y: auto; border: 1px solid #f0f0f0; border-radius: 8px; padding: 8px; }
+        .picker-option { display: flex; align-items: flex-start; gap: 8px; padding: 8px 6px; border-radius: 6px; }
+        .picker-option:hover { background: #f8f9fa; }
+        .picker-option label { cursor: pointer; line-height: 1.3; font-size: .92rem; }
+        .selected-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+        .chip {
+            background: #eef1ff; color: #4a59c9; border: 1px solid #d9defd;
+            padding: 6px 10px; border-radius: 999px; font-size: .82rem;
+            max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+
+        /* ── Buttons ───────────────────────────────────────────── */
+        .btn {
+            padding: 15px 30px; border: none; border-radius: 10px;
+            font-size: 1rem; font-weight: 600; cursor: pointer;
+            transition: all .3s; text-transform: uppercase; letter-spacing: .5px;
+        }
+        .btn-primary { background: linear-gradient(135deg,#667eea,#764ba2); color: white; }
+        .btn-primary:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(102,126,234,.4); }
+        .btn-primary:disabled { opacity: .6; cursor: not-allowed; }
+        .btn-success { background: linear-gradient(135deg,#11998e,#38ef7d); color: white; }
+        .btn-success:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(17,153,142,.4); }
+        .btn-demo { background: linear-gradient(135deg,#f093fb,#f5576c); color: white; }
+        .btn-demo:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(245,87,108,.4); }
+
+        /* ── Loading / results ─────────────────────────────────── */
+        .loading { display: none; text-align: center; padding: 20px; }
+        .loading.active { display: block; }
+        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #667eea; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto 10px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .results-section { display: none; }
+        .results-section.active { display: block; }
+        .results-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 2px solid #f0f0f0; }
+        .results-count { font-size: 1.2rem; font-weight: 600; color: #667eea; }
+        .results-table-wrapper { overflow-x: auto; margin-bottom: 20px; border-radius: 12px; border: 1px solid #e0e0e0; }
+        .results-table { width: 100%; border-collapse: collapse; font-size: .95rem; }
+        .results-table th, .results-table td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #eee; }
+        .results-table th { background: linear-gradient(135deg,#667eea,#764ba2); color: white; font-weight: 600; white-space: nowrap; }
+        .results-table tr:hover { background: #f8f9fa; }
+        .results-table tr:last-child td { border-bottom: none; }
+        .results-table .col-wine { font-weight: 600; color: #333; }
+        .results-table .col-price { font-weight: 700; color: #11998e; }
+        .results-table .col-location { color: #666; }
+
+        .alert { padding: 15px 20px; border-radius: 10px; margin-bottom: 20px; display: none; }
+        .alert.active { display: block; }
+        .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .alert-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .alert-info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+
+        .empty-state { text-align: center; padding: 60px 20px; color: #999; }
+        .empty-state-icon { font-size: 4rem; margin-bottom: 20px; }
+
+        @media (max-width: 768px) {
+            .header h1 { font-size: 2rem; }
+            .search-form { flex-direction: column; }
+            .results-table th, .results-table td { padding: 10px 12px; font-size: .9rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🍷 Miraval Price Checker</h1>
+            <p>Search Australian wine websites and save to Google Sheets</p>
+        </div>
+
+        <div class="card">
+            <!-- Status bar -->
+            <div class="status-section" id="statusSection">
+                <div style="margin-bottom:10px;font-weight:600;">System Status:</div>
+                <div class="status-item">
+                    <span class="status-indicator not-ready" id="configStatus"></span>
+                    <span>Config</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-indicator not-ready" id="scraperStatus"></span>
+                    <span>Scraper</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-indicator not-ready" id="sheetsStatus"></span>
+                    <span>Google Sheets</span>
+                </div>
+                <div id="statusMessage" style="margin-top:10px;font-size:.9rem;color:#666;">Loading status…</div>
+            </div>
+
+            <!-- Google Sheets panel -->
+            <div class="sheets-panel" id="sheetsPanel">
+                <h3>📊 Google Sheets</h3>
+
+                <!-- State: not connected, no client_secret -->
+                <div id="sheetsSetup" style="display:none;">
+                    <p style="font-size:.9rem;margin-bottom:10px;">To save results to Google Sheets, set up OAuth credentials:</p>
+                    <div class="setup-instructions">
+                        <ol>
+                            <li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console → Credentials</a></li>
+                            <li>Create an <strong>OAuth 2.0 Client ID</strong> (type: <strong>Web application</strong>)</li>
+                            <li>Add <strong>Authorised redirect URI</strong>: <code id="redirectUriDisplay">http://localhost:5050/api/sheets/callback</code></li>
+                            <li>Enable the <strong>Google Sheets API</strong> and <strong>Google Drive API</strong> in your project</li>
+                            <li>Download the JSON and save it as <code>client_secret.json</code> in the app folder</li>
+                            <li>Restart the server, then click <strong>Connect</strong> below</li>
+                        </ol>
+                    </div>
+                </div>
+
+                <!-- State: client_secret exists but not connected -->
+                <div id="sheetsConnectBtn" style="display:none;">
+                    <button class="btn-google" onclick="connectGoogle()">
+                        <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.27-4.74 3.27-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+                        Connect with Google
+                    </button>
+                </div>
+
+                <!-- State: connected -->
+                <div id="sheetsConnected" style="display:none;">
+                    <div class="connected-info">
+                        <span style="color:#38ef7d;font-weight:700;">●</span>
+                        <span>Connected</span>
+                        <span id="sheetLink"></span>
+                        <button class="btn-sm primary" id="createSheetBtn" onclick="createSheet()" style="display:none;">Create Spreadsheet</button>
+                        <a id="openSheetLink" href="#" target="_blank" style="display:none;" class="btn-sm">Open Sheet ↗</a>
+                        <button class="btn-sm danger" onclick="disconnectGoogle()">Disconnect</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="alertContainer"></div>
+
+            <!-- Search -->
+            <div class="search-section">
+                <form class="search-form" id="searchForm">
+                    <div class="picker-container">
+                        <button type="button" class="picker-trigger" id="pickerTrigger">Select wines to search…</button>
+                        <div class="picker-dropdown" id="pickerDropdown">
+                            <input type="text" class="picker-search" id="pickerSearch" placeholder="Filter wines…">
+                            <div class="picker-actions">
+                                <button type="button" class="picker-action-btn" id="selectAllBtn">Select all</button>
+                                <button type="button" class="picker-action-btn" id="clearAllBtn">Clear</button>
+                            </div>
+                            <div class="picker-options" id="pickerOptions"></div>
+                        </div>
+                        <div class="selected-chips" id="selectedChips"></div>
+                    </div>
+                    <button type="submit" class="btn btn-primary" id="searchBtn">Search</button>
+                    <button type="button" class="btn btn-demo" id="demoBtn" title="Load sample results to test the app">Try Demo</button>
+                </form>
+                <p style="font-size:.85rem;color:#666;margin-top:8px;">
+                    Select one or more wines, then click <strong>Search</strong>. <strong>Try Demo</strong> uses sample data.
+                </p>
+            </div>
+
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>Searching Australian wine websites…</p>
+                <p style="font-size:.9rem;margin-top:10px;color:#666;">⏱️ This may take 60–90 seconds. Please keep this page open…</p>
+                <div id="searchProgress" style="margin-top:10px;font-size:.85rem;color:#667eea;"></div>
+            </div>
+
+            <div class="results-section" id="resultsSection">
+                <div class="results-header">
+                    <div class="results-count" id="resultsCount">0 results found</div>
+                    <button class="btn btn-success" id="addToSheetBtn">Add to Google Sheet</button>
+                </div>
+                <div class="results-table-wrapper" id="resultsTableWrapper">
+                    <table class="results-table" id="resultsTable">
+                        <thead>
+                            <tr><th>Search Term</th><th>Wine</th><th>Price</th><th>Location</th></tr>
+                        </thead>
+                        <tbody id="resultsBody"></tbody>
+                    </table>
+                </div>
+                <div class="empty-state" id="emptyState" style="display:none;">
+                    <div class="empty-state-icon">🍷</div>
+                    <h3>No results found</h3>
+                    <p>Try searching with a different wine name</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+/* ================================================================
+   State
+   ================================================================ */
+let currentResults = [];
+let sheetsReady = false;
+
+const wineCatalog = [
+    "Famille Perrin Côtes du Rhône Rouge Domaine de Breseyme",
+    "Famille Perrin Côtes du Rhône Blanc Domaine de Breseyme",
+    "Famille Perrin Vinsobres Rouge Les Hauts de Julien",
+    "Famille Perrin Gigondas Rouge L'Argnée",
+    "Famille Perrin Châteauneuf-du-Pape Rouge Les Chapouins",
+    "Famille Perrin Côtes-du-Rhône Réserve Rouge",
+    "Famille Perrin Côtes-du-Rhône Réserve Blanc",
+    "Famille Perrin Côtes du Rhône Villages Rouge",
+    "La Vieille Ferme Rouge",
+    "La Vieille Ferme Blanc",
+    "La Vieille Ferme Rosé",
+    "La Vieille Ferme Ventoux Rouge",
+    "La Vieille Ferme Luberon Blanc",
+    "La Vieille Ferme Luberon Rosé",
+    "La Vieille Ferme Ventoux Rosé",
+    "Miraval Rosé",
+    "Miraval Blanc",
+    "Studio Blanc by Miraval",
+    "Studio Rosé by Miraval",
+    "Fleur de Miraval"
+];
+const selectedWines = new Set(["Miraval Rosé"]);
+
+/* ================================================================
+   Helpers
+   ================================================================ */
+function escapeHtml(text) {
+    const d = document.createElement('div');
+    d.textContent = text;
+    return d.innerHTML;
+}
+
+function showAlert(message, type = 'info') {
+    const c = document.getElementById('alertContainer');
+    c.innerHTML = `<div class="alert alert-${type} active">${message}</div>`;
+    setTimeout(() => { const a = c.querySelector('.alert'); if (a) { a.classList.remove('active'); setTimeout(() => a.remove(), 300); } }, 5000);
+}
+
+function updateStatusIndicator(id, isReady) {
+    const el = document.getElementById(id);
+    if (el) el.className = `status-indicator ${isReady ? 'ready' : 'not-ready'}`;
+}
+
+/* ================================================================
+   Wine picker
+   ================================================================ */
+function renderWineOptions(filter = '') {
+    const options = document.getElementById('pickerOptions');
+    const q = filter.trim().toLowerCase();
+    const rows = wineCatalog.filter(n => n.toLowerCase().includes(q));
+    options.innerHTML = rows.map((name, i) => {
+        const checked = selectedWines.has(name) ? 'checked' : '';
+        const id = `wine-opt-${i}-${name.length}`;
+        return `<div class="picker-option"><input type="checkbox" id="${id}" data-wine="${escapeHtml(name)}" ${checked}><label for="${id}">${escapeHtml(name)}</label></div>`;
+    }).join('') || '<div style="padding:8px;color:#888;">No wines match your filter.</div>';
+
+    options.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        cb.addEventListener('change', e => {
+            const w = e.target.getAttribute('data-wine');
+            e.target.checked ? selectedWines.add(w) : selectedWines.delete(w);
+            updateSelectedUI();
+        });
+    });
+}
+
+function updateSelectedUI() {
+    const trigger = document.getElementById('pickerTrigger');
+    const chips = document.getElementById('selectedChips');
+    const arr = Array.from(selectedWines);
+    trigger.textContent = arr.length ? `${arr.length} wine${arr.length > 1 ? 's' : ''} selected` : 'Select wines to search…';
+    chips.innerHTML = arr.slice(0, 8).map(n => `<span class="chip">${escapeHtml(n)}</span>`).join('');
+    if (arr.length > 8) chips.innerHTML += `<span class="chip">+${arr.length - 8} more</span>`;
+}
+
+/* ================================================================
+   Google Sheets connection
+   ================================================================ */
+async function refreshSheetsUI() {
+    try {
+        const r = await fetch('/api/status');
+        const s = await r.json();
+
+        const setup = document.getElementById('sheetsSetup');
+        const connectBtn = document.getElementById('sheetsConnectBtn');
+        const connected = document.getElementById('sheetsConnected');
+        const createBtn = document.getElementById('createSheetBtn');
+        const openLink = document.getElementById('openSheetLink');
+
+        // Update redirect URI display
+        const uriEl = document.getElementById('redirectUriDisplay');
+        if (uriEl) uriEl.textContent = `${location.protocol}//${location.host}/api/sheets/callback`;
+
+        setup.style.display = 'none';
+        connectBtn.style.display = 'none';
+        connected.style.display = 'none';
+
+        if (!s.client_secret_exists) {
+            setup.style.display = 'block';
+        } else if (!s.oauth_connected) {
+            connectBtn.style.display = 'block';
+            setup.style.display = 'block'; // show instructions too
+        } else {
+            connected.style.display = 'block';
+            if (s.sheet_configured && s.sheet_url) {
+                createBtn.style.display = 'none';
+                openLink.style.display = 'inline-block';
+                openLink.href = s.sheet_url;
+            } else {
+                createBtn.style.display = 'inline-block';
+                openLink.style.display = 'none';
+            }
+        }
+
+        sheetsReady = s.sheets_ready;
+        updateStatusIndicator('sheetsStatus', s.sheets_ready);
+        updateStatusIndicator('configStatus', s.config_exists);
+        updateStatusIndicator('scraperStatus', s.scraper_ready);
+
+        return s;
+    } catch (e) {
+        console.error('Error fetching status:', e);
+        return null;
+    }
+}
+
+async function connectGoogle() {
+    try {
+        const r = await fetch('/api/sheets/connect');
+        const d = await r.json();
+        if (d.error) {
+            showAlert(d.error, 'error');
+            return;
+        }
+        // Open Google consent in current tab
+        window.location.href = d.auth_url;
+    } catch (e) {
+        showAlert('Error starting Google connection: ' + e.message, 'error');
+    }
+}
+
+async function disconnectGoogle() {
+    if (!confirm('Disconnect Google Sheets?')) return;
+    try {
+        await fetch('/api/sheets/disconnect', { method: 'POST' });
+        showAlert('Google Sheets disconnected', 'info');
+        await refreshSheetsUI();
+    } catch (e) {
+        showAlert('Error disconnecting: ' + e.message, 'error');
+    }
+}
+
+async function createSheet() {
+    const btn = document.getElementById('createSheetBtn');
+    btn.disabled = true;
+    btn.textContent = 'Creating…';
+    try {
+        const r = await fetch('/api/sheets/create', { method: 'POST' });
+        const d = await r.json();
+        if (d.error) {
+            showAlert(d.error, 'error');
+            return;
+        }
+        showAlert(`Spreadsheet created! <a href="${d.url}" target="_blank" style="color:#155724;font-weight:600;">Open it →</a>`, 'success');
+        await refreshSheetsUI();
+    } catch (e) {
+        showAlert('Error creating spreadsheet: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Create Spreadsheet';
+    }
+}
+
+/* ================================================================
+   Search & results
+   ================================================================ */
+function displayResults(results) {
+    currentResults = results;
+    const section = document.getElementById('resultsSection');
+    const body = document.getElementById('resultsBody');
+    const wrapper = document.getElementById('resultsTableWrapper');
+    const empty = document.getElementById('emptyState');
+    const count = document.getElementById('resultsCount');
+
+    if (results.length === 0) {
+        wrapper.style.display = 'none';
+        empty.style.display = 'block';
+    } else {
+        wrapper.style.display = 'block';
+        empty.style.display = 'none';
+        body.innerHTML = results.map(r => `
+            <tr>
+                <td>${escapeHtml(r.query || '-')}</td>
+                <td class="col-wine">${escapeHtml(r.wine)}</td>
+                <td class="col-price">${escapeHtml(r.price)}</td>
+                <td class="col-location">${escapeHtml(r.location)}</td>
+            </tr>
+        `).join('');
+    }
+    count.textContent = `${results.length} result${results.length !== 1 ? 's' : ''} found`;
+    section.classList.add('active');
+}
+
+async function doSearch(wineNames, useDemo = false) {
+    const searchBtn = document.getElementById('searchBtn');
+    const demoBtn = document.getElementById('demoBtn');
+    const loading = document.getElementById('loading');
+    const progressDiv = document.getElementById('searchProgress');
+
+    searchBtn.disabled = true;
+    demoBtn.disabled = true;
+    loading.classList.add('active');
+    document.getElementById('resultsSection').classList.remove('active');
+
+    let counter = 0;
+    const timer = useDemo ? null : setInterval(() => {
+        counter += 5;
+        if (counter <= 120) progressDiv.textContent = `Searching… ${counter}s elapsed`;
+    }, 5000);
+
+    try {
+        const ctrl = new AbortController();
+        const timeout = setTimeout(() => ctrl.abort(), useDemo ? 5000 : 180000);
+
+        const resp = await fetch('/api/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ wine_names: wineNames, demo: useDemo }),
+            signal: ctrl.signal,
+        });
+        clearTimeout(timeout);
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        if (data.success) {
+            displayResults(data.results);
+            if (data.count > 0) {
+                showAlert(useDemo
+                    ? `Demo: ${data.count} sample result${data.count !== 1 ? 's' : ''} loaded`
+                    : `Found ${data.count} result${data.count !== 1 ? 's' : ''}`, 'success');
+            } else if (!useDemo) {
+                showAlert('No results found. Try "Try Demo" for sample data.', 'info');
+            }
+        } else {
+            showAlert(data.error || 'Error searching', 'error');
+        }
+    } catch (e) {
+        showAlert(e.name === 'AbortError' ? 'Search timed out.' : 'Network error: ' + e.message, 'error');
+    } finally {
+        if (timer) clearInterval(timer);
+        progressDiv.textContent = '';
+        searchBtn.disabled = false;
+        demoBtn.disabled = false;
+        loading.classList.remove('active');
+    }
+}
+
+/* ================================================================
+   Event listeners
+   ================================================================ */
+document.getElementById('searchForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const wines = Array.from(selectedWines);
+    if (!wines.length) { showAlert('Please select at least one wine', 'error'); return; }
+    await doSearch(wines, false);
+});
+
+document.getElementById('demoBtn').addEventListener('click', async () => {
+    let wines = Array.from(selectedWines);
+    if (!wines.length) wines = ['Miraval Rosé'];
+    await doSearch(wines, true);
+});
+
+document.getElementById('addToSheetBtn').addEventListener('click', async () => {
+    if (!currentResults.length) { showAlert('No results to add', 'error'); return; }
+    if (!sheetsReady) {
+        showAlert('Google Sheets not connected. Use the panel above to connect first.', 'error');
+        return;
+    }
+
+    const btn = document.getElementById('addToSheetBtn');
+    btn.disabled = true;
+    btn.textContent = 'Adding…';
+
+    try {
+        const r = await fetch('/api/add-to-sheet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ results: currentResults }),
+        });
+        const d = await r.json();
+        if (r.ok && d.success) {
+            let msg = d.message;
+            if (d.sheet_url) msg += ` — <a href="${d.sheet_url}" target="_blank" style="color:#155724;font-weight:600;">Open Sheet →</a>`;
+            showAlert(msg, 'success');
+        } else {
+            showAlert(d.error || 'Error adding to sheet', 'error');
+        }
+    } catch (e) {
+        showAlert('Network error: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Add to Google Sheet';
+    }
+});
+
+// Picker interactions
+const pickerTrigger = document.getElementById('pickerTrigger');
+const pickerDropdown = document.getElementById('pickerDropdown');
+const pickerSearch = document.getElementById('pickerSearch');
+
+pickerTrigger.addEventListener('click', () => {
+    pickerDropdown.classList.toggle('open');
+    if (pickerDropdown.classList.contains('open')) pickerSearch.focus();
+});
+document.addEventListener('click', e => { if (!e.target.closest('.picker-container')) pickerDropdown.classList.remove('open'); });
+pickerSearch.addEventListener('input', e => renderWineOptions(e.target.value));
+document.getElementById('selectAllBtn').addEventListener('click', () => { wineCatalog.forEach(n => selectedWines.add(n)); renderWineOptions(pickerSearch.value); updateSelectedUI(); });
+document.getElementById('clearAllBtn').addEventListener('click', () => { selectedWines.clear(); renderWineOptions(pickerSearch.value); updateSelectedUI(); });
+
+/* ================================================================
+   Init
+   ================================================================ */
+(async () => {
+    renderWineOptions();
+    updateSelectedUI();
+
+    // Check for post-OAuth redirect
+    const params = new URLSearchParams(location.search);
+    if (params.get('sheets_connected')) {
+        showAlert('Google Sheets connected successfully!', 'success');
+        history.replaceState({}, '', '/');
+    }
+    if (params.get('sheets_error')) {
+        showAlert('Google connection error: ' + params.get('sheets_error'), 'error');
+        history.replaceState({}, '', '/');
+    }
+
+    const s = await refreshSheetsUI();
+    if (s) {
+        const statusMsg = document.getElementById('statusMessage');
+        const ok = [s.config_exists, s.scraper_ready].filter(Boolean).length;
+        if (ok === 2) {
+            statusMsg.textContent = '✓ Server ready! You can search for wines.';
+            statusMsg.style.color = '#11998e';
+        } else {
+            statusMsg.textContent = '⚠ Some components not ready. Check configuration.';
+            statusMsg.style.color = '#ff6b6b';
+        }
+    }
+})();
+</script>
+</body>
+</html>
