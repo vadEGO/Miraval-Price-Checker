@@ -6,6 +6,7 @@ Flask web application for Miraval Price Checker
 
 import json
 import os
+from datetime import datetime
 from flask import Flask, render_template, request, jsonify, redirect
 from flask_cors import CORS
 from wine_scraper import WineScraper, GoogleSheetsWriter
@@ -39,6 +40,36 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 scraper = None
 sheets_writer = None
 _app_port = 5050  # updated at startup
+DEFAULT_WINE_CATALOG = [
+    "Famille Perrin Côtes du Rhône Rouge Domaine de Breseyme",
+    "Famille Perrin Côtes du Rhône Blanc Domaine de Breseyme",
+    "Famille Perrin Vinsobres Rouge Les Hauts de Julien",
+    "Famille Perrin Gigondas Rouge L'Argnée",
+    "Famille Perrin Châteauneuf-du-Pape Rouge Les Chapouins",
+    "Famille Perrin Côtes-du-Rhône Réserve Rouge",
+    "Famille Perrin Côtes-du-Rhône Réserve Blanc",
+    "Famille Perrin Côtes du Rhône Villages Rouge",
+    "La Vieille Ferme Rouge",
+    "La Vieille Ferme Blanc",
+    "La Vieille Ferme Rosé",
+    "La Vieille Ferme Ventoux Rouge",
+    "La Vieille Ferme Luberon Blanc",
+    "La Vieille Ferme Luberon Rosé",
+    "La Vieille Ferme Ventoux Rosé",
+    "Miraval Rosé",
+    "Miraval Blanc",
+    "Studio Blanc by Miraval",
+    "Studio Rosé by Miraval",
+    "Fleur de Miraval",
+]
+DEFAULT_COMPETITOR_WINES = [
+    "Minuty M Provence Rosé 750mL",
+    "Whispering Angel Rosé 750mL",
+    "Château d'Esclans Rock Angel Rosé 750mL",
+    "AIX Rosé 750mL",
+    "Maison Saint Aix Provence Rosé 750mL",
+    "Mirabeau Classic Rosé 750mL",
+]
 
 
 # =====================================================================
@@ -98,6 +129,28 @@ def _read_config():
 def _write_config(cfg):
     with open(CONFIG_PATH, 'w') as f:
         json.dump(cfg, f, indent=2)
+
+
+def _clean_wine_list(values):
+    if not isinstance(values, list):
+        return []
+    cleaned = []
+    seen = set()
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        wine = item.strip()
+        if wine and wine.lower() not in seen:
+            seen.add(wine.lower())
+            cleaned.append(wine)
+    return cleaned
+
+
+def _configured_wine_catalog():
+    cfg = _read_config()
+    tracked = _clean_wine_list(cfg.get('tracked_wines')) or DEFAULT_WINE_CATALOG
+    competitors = _clean_wine_list(cfg.get('competitor_wines')) or DEFAULT_COMPETITOR_WINES
+    return tracked, competitors
 
 
 def _init_sheets_writer(creds=None):
@@ -188,6 +241,8 @@ def search_wines():
     try:
         if not scraper:
             init_scraper()
+        if not scraper:
+            return jsonify({'error': 'Scraper not initialised. Check config.json.'}), 500
 
         data = request.get_json()
         if not data:
@@ -232,7 +287,11 @@ def search_wines():
         for selected_name in normalized_names:
             print(f"   • {selected_name}")
             for row in scraper.search_all_sites(selected_name):
-                results.append({**row, 'query': selected_name})
+                results.append({
+                    **row,
+                    'query': selected_name,
+                    'scraped_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
 
         # De-duplicate
         unique, dedupe_seen = [], set()
@@ -290,6 +349,16 @@ def sheets_connect():
 def sheets_callback():
     """Google redirects here after the user grants consent."""
     try:
+        state_path = os.path.join(BASE_DIR, '_oauth_state.tmp')
+        expected_state = None
+        if os.path.exists(state_path):
+            with open(state_path) as f:
+                expected_state = f.read().strip()
+            os.remove(state_path)
+        incoming_state = request.args.get('state', '').strip()
+        if expected_state and incoming_state != expected_state:
+            raise ValueError('OAuth state mismatch. Please retry connection.')
+
         flow = _build_flow()
         flow.fetch_token(code=request.args.get('code'))
         _save_token(flow.credentials)
@@ -392,6 +461,94 @@ def add_to_sheet():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/catalog', methods=['GET'])
+def get_catalog():
+    tracked_wines, competitor_wines = _configured_wine_catalog()
+    combined = []
+    seen = set()
+    for wine in tracked_wines + competitor_wines:
+        k = wine.lower()
+        if k not in seen:
+            seen.add(k)
+            combined.append(wine)
+    return jsonify({
+        'success': True,
+        'tracked_wines': tracked_wines,
+        'competitor_wines': competitor_wines,
+        'wines': combined,
+        'count': len(combined),
+    })
+
+
+@app.route('/api/run-monitoring', methods=['POST'])
+def run_monitoring():
+    """Run the full monitoring workflow for configured wines and optionally write to Sheets."""
+    global scraper
+    try:
+        if not scraper:
+            init_scraper()
+        if not scraper:
+            return jsonify({'error': 'Scraper not initialised. Check config.json.'}), 500
+
+        payload = request.get_json(silent=True) or {}
+        wines = payload.get('wine_names')
+        include_competitors = bool(payload.get('include_competitors', True))
+        if not isinstance(wines, list) or not wines:
+            tracked_wines, competitor_wines = _configured_wine_catalog()
+            wines = tracked_wines + (competitor_wines if include_competitors else [])
+
+        do_write = bool(payload.get('add_to_sheet', True))
+        results = []
+        for wine in wines:
+            if not isinstance(wine, str) or not wine.strip():
+                continue
+            selected_name = wine.strip()
+            for row in scraper.search_all_sites(selected_name):
+                results.append({
+                    **row,
+                    'query': selected_name,
+                    'scraped_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
+
+        # dedupe
+        unique = []
+        dedupe_seen = set()
+        for row in results:
+            key = (
+                row.get('query', '').strip().lower(),
+                row.get('wine', '').strip().lower(),
+                row.get('price', '').strip(),
+                row.get('location', '').strip().lower(),
+            )
+            if key in dedupe_seen:
+                continue
+            dedupe_seen.add(key)
+            unique.append(row)
+
+        wrote_to_sheet = False
+        if do_write and unique:
+            if not sheets_writer:
+                _init_sheets_writer()
+            if not sheets_writer or not sheets_writer.worksheet:
+                return jsonify({
+                    'error': 'Google Sheets not connected or sheet not selected.',
+                    'searched_count': len(wines),
+                    'count': len(unique),
+                }), 400
+            sheets_writer.add_results(unique)
+            wrote_to_sheet = True
+
+        return jsonify({
+            'success': True,
+            'searched_count': len(wines),
+            'count': len(unique),
+            'wrote_to_sheet': wrote_to_sheet,
+            'results': unique,
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # =====================================================================
