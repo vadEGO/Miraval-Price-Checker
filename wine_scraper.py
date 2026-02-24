@@ -63,6 +63,54 @@ class WineScraper:
             "label": "Grand Cru Wine Shop",
             "search_url": "https://www.grandcruwineshop.com.au/search?type=product&q={query}",
         },
+        "vinomofo.com": {
+            "label": "Vinomofo",
+            "search_url": "https://www.vinomofo.com/search?q={query}",
+        },
+        "justwines.com.au": {
+            "label": "Just Wines",
+            "search_url": "https://www.justwines.com.au/search?q={query}",
+        },
+        "boozebud.com": {
+            "label": "BoozeBud",
+            "search_url": "https://www.boozebud.com/search/{query}",
+        },
+        "langtons.com.au": {
+            "label": "Langton's",
+            "search_url": "https://www.langtons.com.au/search?searchTerm={query}",
+        },
+        "nakedwines.com.au": {
+            "label": "Naked Wines",
+            "search_url": "https://www.nakedwines.com.au/full-site-search.htm?searchTerm={query}",
+        },
+        "getwinesdirect.com": {
+            "label": "Get Wines Direct",
+            "search_url": "https://www.getwinesdirect.com/search?q={query}",
+        },
+        "crackawines.com.au": {
+            "label": "Cracka Wines",
+            "search_url": "https://www.crackawines.com.au/search?q={query}",
+        },
+        "wine.com.au": {
+            "label": "Wine.com.au",
+            "search_url": "https://www.wine.com.au/search?q={query}",
+        },
+        "qantaswine.com": {
+            "label": "Qantas Wine",
+            "search_url": "https://www.qantaswine.com/search?q={query}",
+        },
+        "winestar.com.au": {
+            "label": "WineStar",
+            "search_url": "https://www.winestar.com.au/catalogsearch/result/?q={query}",
+        },
+        "decanterswinecellar.com.au": {
+            "label": "Decanters Wine Cellar",
+            "search_url": "https://www.decanterswinecellar.com.au/search?type=product&q={query}",
+        },
+        "winepeople.com.au": {
+            "label": "Wine People",
+            "search_url": "https://www.winepeople.com.au/search?q={query}",
+        },
     }
 
     def __init__(self, config_path: str = "config.json", use_selenium: bool = False):
@@ -166,7 +214,13 @@ class WineScraper:
                 'api_url': 'https://api.bws.com.au/apis/ui/Search/products',
                 'origin': 'https://www.bws.com.au',
                 'referer': 'https://www.bws.com.au/',
-                'location': "Dan Murphy's",  # flagged via rangedtodm
+                'location': "Dan Murphy's",
+            },
+            'jimmybrings': {
+                'api_url': 'https://api.bws.com.au/apis/ui/Search/products',
+                'origin': 'https://www.jimmybrings.com.au',
+                'referer': 'https://www.jimmybrings.com.au/',
+                'location': 'Jimmy Brings',
             },
         }
 
@@ -271,6 +325,15 @@ class WineScraper:
     def search_bws(self, wine_name: str) -> List[Dict]:
         """Search BWS via Endeavour Group API."""
         return self._search_endeavour_api(wine_name, 'bws')
+
+    def search_jimmy_brings(self, wine_name: str) -> List[Dict]:
+        """Search Jimmy Brings via Endeavour Group API."""
+        return self._search_endeavour_api(wine_name, 'jimmybrings')
+
+    def search_vintage_cellars(self, wine_name: str) -> List[Dict]:
+        """Search Vintage Cellars using their search page."""
+        url = f"https://www.vintagecellars.com.au/search?q={quote_plus(wine_name)}"
+        return self._scrape_html_site(url, 'Vintage Cellars', wine_name)
 
     # ── HTML scraping (Kent Street Cellars, Liquorland, First Choice) ───
 
@@ -475,18 +538,44 @@ class WineScraper:
 
     # ── Orchestrator ────────────────────────────────────────────────────
 
-    def search_all_sites(self, wine_name: str) -> List[Dict]:
-        """Search all configured wine sites."""
+    def get_site_label(self, site_key: str) -> str:
+        """Return a human-readable label for a site key."""
+        labels = {
+            'danmurphys.com.au': "Dan Murphy's",
+            'bws.com.au': 'BWS',
+            'jimmybrings.com.au': 'Jimmy Brings',
+            'liquorland.com.au': 'Liquorland',
+            'firstchoice.com.au': 'First Choice',
+            'vintagecellars.com.au': 'Vintage Cellars',
+        }
+        if site_key in labels:
+            return labels[site_key]
+        cfg = self.INDEPENDENT_SITE_CONFIG.get(site_key)
+        return cfg["label"] if cfg else site_key
+
+    def search_all_sites(self, wine_name: str, progress_callback=None) -> List[Dict]:
+        """Search all configured wine sites.
+
+        Args:
+            wine_name: Wine to search for.
+            progress_callback: Optional callable(site_key, site_index, total_sites, results_so_far)
+                               invoked before each site is searched.
+        """
         all_results = []
 
         site_handlers = {
             'danmurphys.com.au': self.search_dan_murphys,
             'bws.com.au': self.search_bws,
+            'jimmybrings.com.au': self.search_jimmy_brings,
             'liquorland.com.au': self.search_liquorland,
             'firstchoice.com.au': self.search_first_choice,
+            'vintagecellars.com.au': self.search_vintage_cellars,
         }
 
-        for site in self.wine_sites:
+        total = len(self.wine_sites)
+        for idx, site in enumerate(self.wine_sites):
+            if progress_callback:
+                progress_callback(site, idx, total, len(all_results))
             print(f"Searching {site}...")
             try:
                 handler = site_handlers.get(site)

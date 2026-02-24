@@ -6,6 +6,8 @@ Flask web application for Miraval Price Checker
 
 import json
 import os
+import threading
+import uuid
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, redirect
 from flask_cors import CORS
@@ -40,6 +42,8 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 scraper = None
 sheets_writer = None
 _app_port = 5050  # updated at startup
+_search_progress = {}
+_search_lock = threading.Lock()
 DEFAULT_WINE_CATALOG = [
     "Famille Perrin Côtes du Rhône Rouge Domaine de Breseyme",
     "Famille Perrin Côtes du Rhône Blanc Domaine de Breseyme",
@@ -282,16 +286,38 @@ def search_wines():
         if not scraper:
             return jsonify({'error': 'Scraper not initialised. Check config.json.'}), 500
 
-        print(f"\n🔍 Searching {len(normalized_names)} wine(s)…")
+        search_id = str(uuid.uuid4())[:8]
+        print(f"\n🔍 Searching {len(normalized_names)} wine(s)… [id={search_id}]")
+
+        def on_progress(site_key, site_index, total_sites, results_so_far):
+            label = scraper.get_site_label(site_key)
+            with _search_lock:
+                _search_progress[search_id] = {
+                    'site': label, 'site_index': site_index,
+                    'total_sites': total_sites,
+                    'results_so_far': results_so_far, 'done': False,
+                }
+
+        with _search_lock:
+            _search_progress[search_id] = {
+                'site': 'Starting…', 'site_index': 0,
+                'total_sites': len(scraper.wine_sites),
+                'results_so_far': 0, 'done': False,
+            }
+
         results = []
         for selected_name in normalized_names:
             print(f"   • {selected_name}")
-            for row in scraper.search_all_sites(selected_name):
+            for row in scraper.search_all_sites(selected_name, progress_callback=on_progress):
                 results.append({
                     **row,
                     'query': selected_name,
                     'scraped_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 })
+
+        with _search_lock:
+            if search_id in _search_progress:
+                _search_progress[search_id]['done'] = True
 
         # De-duplicate
         unique, dedupe_seen = [], set()
@@ -317,6 +343,33 @@ def search_wines():
         import traceback
         print(f"✗ search_wines error: {e}\n{traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e), 'results': [], 'count': 0}), 500
+
+
+# =====================================================================
+# Routes — search progress
+# =====================================================================
+
+@app.route('/api/search/progress/<search_id>')
+def search_progress(search_id):
+    with _search_lock:
+        info = _search_progress.get(search_id)
+    if not info:
+        return jsonify({'error': 'Unknown search'}), 404
+    return jsonify(info)
+
+
+@app.route('/api/search/sites')
+def search_sites():
+    """Return the ordered list of sites that will be searched, with labels."""
+    if not scraper:
+        init_scraper()
+    if not scraper:
+        return jsonify({'sites': []})
+    sites = [
+        {'key': s, 'label': scraper.get_site_label(s)}
+        for s in scraper.wine_sites
+    ]
+    return jsonify({'sites': sites, 'count': len(sites)})
 
 
 # =====================================================================

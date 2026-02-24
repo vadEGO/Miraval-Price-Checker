@@ -157,10 +157,68 @@
         .btn-demo:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(245,87,108,.4); }
 
         /* ── Loading / results ─────────────────────────────────── */
-        .loading { display: none; text-align: center; padding: 20px; }
+        .loading { display: none; text-align: center; padding: 30px 20px; }
         .loading.active { display: block; }
-        .spinner { border: 4px solid #ececef; border-top: 4px solid #d5a98f; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto 10px; }
+        .spinner { border: 4px solid #ececef; border-top: 4px solid #d5a98f; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto 15px; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        .site-carousel {
+            margin: 18px auto 0;
+            max-width: 420px;
+            overflow: hidden;
+            position: relative;
+            height: 38px;
+        }
+        .site-carousel-track {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+        }
+        .site-carousel-item {
+            position: absolute;
+            width: 100%;
+            text-align: center;
+            font-size: .82rem;
+            font-weight: 500;
+            letter-spacing: .12rem;
+            text-transform: uppercase;
+            color: #b3866f;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity .4s ease, transform .4s ease;
+            white-space: nowrap;
+        }
+        .site-carousel-item.active {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .site-carousel-item.exiting {
+            opacity: 0;
+            transform: translateY(-20px);
+        }
+        .search-progress-bar {
+            margin: 14px auto 0;
+            max-width: 320px;
+            height: 4px;
+            background: #ebe5e0;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .search-progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #d5a98f, #b3866f);
+            border-radius: 2px;
+            transition: width .5s ease;
+            width: 0%;
+        }
+        .search-progress-stats {
+            margin-top: 10px;
+            font-size: .72rem;
+            letter-spacing: .08rem;
+            text-transform: uppercase;
+            color: #999;
+        }
         .results-section { display: none; }
         .results-section.active { display: block; }
         .results-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 2px solid #f0f0f0; }
@@ -295,9 +353,14 @@
 
             <div class="loading" id="loading">
                 <div class="spinner"></div>
-                <p>Searching Australian wine websites…</p>
-                <p style="font-size:.9rem;margin-top:10px;color:#666;">⏱️ This may take 60–90 seconds. Please keep this page open…</p>
-                <div id="searchProgress" style="margin-top:10px;font-size:.85rem;color:#667eea;"></div>
+                <p style="font-size:.82rem;letter-spacing:.12rem;text-transform:uppercase;color:#53545f;">Searching Australian wine websites…</p>
+                <div class="site-carousel" id="siteCarousel">
+                    <div class="site-carousel-track" id="carouselTrack"></div>
+                </div>
+                <div class="search-progress-bar">
+                    <div class="search-progress-fill" id="progressFill"></div>
+                </div>
+                <div class="search-progress-stats" id="progressStats"></div>
             </div>
 
             <div class="results-section" id="resultsSection">
@@ -524,44 +587,116 @@ function displayResults(results) {
     section.classList.add('active');
 }
 
+let _carouselSites = [];
+
+async function loadSiteList() {
+    if (_carouselSites.length) return;
+    try {
+        const r = await fetch('/api/search/sites');
+        const d = await r.json();
+        _carouselSites = (d.sites || []).map(s => s.label);
+    } catch (e) { _carouselSites = []; }
+}
+
+function initCarousel() {
+    const track = document.getElementById('carouselTrack');
+    track.innerHTML = '';
+    _carouselSites.forEach((label, i) => {
+        const el = document.createElement('div');
+        el.className = 'site-carousel-item';
+        el.textContent = label;
+        el.dataset.idx = i;
+        track.appendChild(el);
+    });
+}
+
+function showCarouselItem(index) {
+    document.querySelectorAll('.site-carousel-item').forEach(el => {
+        const idx = parseInt(el.dataset.idx);
+        if (idx === index) {
+            el.classList.remove('exiting');
+            el.classList.add('active');
+        } else if (el.classList.contains('active')) {
+            el.classList.remove('active');
+            el.classList.add('exiting');
+            setTimeout(() => el.classList.remove('exiting'), 400);
+        } else {
+            el.classList.remove('active', 'exiting');
+        }
+    });
+}
+
+function updateProgressBar(siteIndex, totalSites) {
+    const pct = totalSites > 0 ? Math.round(((siteIndex + 1) / totalSites) * 100) : 0;
+    document.getElementById('progressFill').style.width = pct + '%';
+}
+
+function updateProgressStats(siteIndex, totalSites, resultsSoFar) {
+    const el = document.getElementById('progressStats');
+    el.textContent = `Site ${siteIndex + 1} of ${totalSites}` +
+        (resultsSoFar > 0 ? ` · ${resultsSoFar} result${resultsSoFar !== 1 ? 's' : ''} so far` : '');
+}
+
 async function doSearch(wineNames, useDemo = false) {
     const searchBtn = document.getElementById('searchBtn');
     const demoBtn = document.getElementById('demoBtn');
     const loading = document.getElementById('loading');
-    const progressDiv = document.getElementById('searchProgress');
 
     searchBtn.disabled = true;
     demoBtn.disabled = true;
     loading.classList.add('active');
     document.getElementById('resultsSection').classList.remove('active');
+    document.getElementById('progressFill').style.width = '0%';
+    document.getElementById('progressStats').textContent = '';
 
-    let counter = 0;
-    const timer = useDemo ? null : setInterval(() => {
-        counter += 5;
-        if (counter <= 120) progressDiv.textContent = `Searching… ${counter}s elapsed`;
-    }, 5000);
+    if (!useDemo) {
+        await loadSiteList();
+        initCarousel();
+    }
 
     try {
         const ctrl = new AbortController();
-        const timeout = setTimeout(() => ctrl.abort(), useDemo ? 5000 : 180000);
+        const timeout = setTimeout(() => ctrl.abort(), useDemo ? 5000 : 300000);
 
-        const resp = await fetch('/api/search', {
+        const fetchPromise = fetch('/api/search', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ wine_names: wineNames, demo: useDemo }),
             signal: ctrl.signal,
         });
+
+        let fallbackTimer = null;
+        if (!useDemo && _carouselSites.length) {
+            showCarouselItem(0);
+            updateProgressBar(0, _carouselSites.length);
+            updateProgressStats(0, _carouselSites.length, 0);
+            let idx = 0;
+            const total = _carouselSites.length;
+            fallbackTimer = setInterval(() => {
+                if (idx < total - 1) idx++;
+                showCarouselItem(idx);
+                updateProgressBar(idx, total);
+                updateProgressStats(idx, total, 0);
+            }, 3000);
+            fetchPromise.then(() => clearInterval(fallbackTimer))
+                        .catch(() => clearInterval(fallbackTimer));
+        }
+
+        const resp = await fetchPromise;
         clearTimeout(timeout);
+        if (fallbackTimer) clearInterval(fallbackTimer);
+        document.getElementById('progressFill').style.width = '100%';
 
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
 
         if (data.success) {
             displayResults(data.results);
+            const siteCount = _carouselSites.length || '?';
             if (data.count > 0) {
                 showAlert(useDemo
                     ? `Demo: ${data.count} sample result${data.count !== 1 ? 's' : ''} loaded`
-                    : `Found ${data.count} result${data.count !== 1 ? 's' : ''}`, 'success');
+                    : `Found ${data.count} result${data.count !== 1 ? 's' : ''} across ${siteCount} sites`, 'success');
             } else if (!useDemo) {
                 showAlert('No results found. Try "Try Demo" for sample data.', 'info');
             }
@@ -571,8 +706,6 @@ async function doSearch(wineNames, useDemo = false) {
     } catch (e) {
         showAlert(e.name === 'AbortError' ? 'Search timed out.' : 'Network error: ' + e.message, 'error');
     } finally {
-        if (timer) clearInterval(timer);
-        progressDiv.textContent = '';
         searchBtn.disabled = false;
         demoBtn.disabled = false;
         loading.classList.remove('active');
