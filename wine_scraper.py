@@ -162,6 +162,9 @@ class WineScraper:
         1. If query contains a colour/style word (blanc/rouge/rosé), the
            candidate MUST also contain it — a Blanc must not match a Rosé.
         2. All meaningful (non-filler) tokens are checked; majority must match.
+        3. Candidate must NOT contain significant extra words absent from the
+           query — e.g. "Miraval Rosé" must not match "Miraval Studio Rosé"
+           because "studio" is a meaningful differentiator not in the query.
         """
         query = self._normalize_text(search_term)
         candidate = self._normalize_text(candidate_name)
@@ -189,11 +192,42 @@ class WineScraper:
         if not meaningful_tokens:
             meaningful_tokens = query_tokens
 
+        meaningful_set = set(meaningful_tokens)
         overlap = sum(1 for t in meaningful_tokens if t in candidate)
 
         # Require majority overlap
         required = max(1, len(meaningful_tokens) // 2 + 1)  # e.g. 3 of 5, 2 of 3, 1 of 1
-        return overlap >= required
+        if overlap < required:
+            return False
+
+        # --- Hard rule: reject candidates with significant extra words ---
+        # Candidate tokens that are meaningful (not filler, not size/vintage noise)
+        # Wine appellation/region words that retailers commonly append but don't
+        # differentiate the product — e.g. "Miraval Rosé" == "Miraval Cotes de Provence Rosé"
+        _APPELLATIONS = {
+            'cotes', 'du', 'rhone', 'rhône', 'provence', 'luberon', 'ventoux',
+            'gigondas', 'vinsobres', 'chateauneuf', 'pape', 'villages',
+            'languedoc', 'bordeaux', 'bourgogne', 'burgundy', 'alsace',
+            'champagne', 'loire', 'val', 'medoc', 'graves', 'pessac',
+            'leognan', 'pomerol', 'margaux', 'pauillac', 'sauternes',
+            'australia', 'barossa', 'valley', 'coonawarra', 'mclaren',
+            'yarra', 'clare', 'eden', 'margaret', 'river', 'hunter',
+        }
+        _NOISE = self._FILLER_WORDS | _APPELLATIONS | {
+            '750ml', '750', '700ml', '1l', '2024', '2025', '2023',
+            '2022', '2021', '2020', '2019', '2018', 'nv', 'each',
+            'bottle', 'pack', '6pk', '12pk', 'case', 'single',
+        }
+        candidate_tokens = [t for t in candidate.split() if len(t) > 1 and t not in _NOISE]
+        extra = [t for t in candidate_tokens if t not in meaningful_set]
+        # For short queries (≤3 meaningful tokens), zero tolerance for extra differentiating
+        # words — "Miraval Rosé" must NOT match "Miraval Studio Rosé".
+        # For longer, more descriptive queries allow 1 extra word (regional/appellation suffix etc.)
+        max_extra = 0 if len(meaningful_tokens) <= 3 else 1
+        if len(extra) > max_extra:
+            return False
+
+        return True
 
     def _search_endeavour_api(self, wine_name: str, brand: str) -> List[Dict]:
         """Search BWS or Dan Murphy's via their JSON API (Endeavour Group).
@@ -271,11 +305,16 @@ class WineScraper:
                         if not self._is_relevant_match(wine_name, name):
                             continue
 
-                        # Check if ranged to Dan Murphy's (for DM searches)
+                        # Extract additional details (rangedtodm, bwsproducturl, etc.)
                         ranged_to_dm = False
+                        bws_product_slug = None
                         for detail in product.get('AdditionalDetails', []):
-                            if detail.get('Name') == 'rangedtodm':
-                                ranged_to_dm = str(detail.get('Value', '')).lower() == 'yes'
+                            dname = detail.get('Name', '').lower()
+                            dval = str(detail.get('Value', ''))
+                            if dname == 'rangedtodm':
+                                ranged_to_dm = dval.lower() == 'yes'
+                            elif dname == 'bwsproducturl':
+                                bws_product_slug = dval.strip()
 
                         location = config['location']
                         if brand == 'danmurphys' and not ranged_to_dm:
@@ -283,14 +322,29 @@ class WineScraper:
 
                         display_name = f"{name} {size}".strip() if size else name
                         price_str = f"${price:.2f}" if price else "N/A"
-                        product_url = (
-                            product.get('ProductUrl')
-                            or product.get('Url')
-                            or product.get('PdpUrl')
-                            or f"https://www.bws.com.au/search?q={quote_plus(wine_name)}"
-                        )
-                        if isinstance(product_url, str) and product_url.startswith('/'):
-                            product_url = f"https://www.bws.com.au{product_url}"
+
+                        # Build the correct product URL per retailer
+                        stockcode = product.get('Stockcode') or product.get('ParentStockCode')
+                        slug = bws_product_slug or product.get('UrlFriendlyName', '')
+                        if brand == 'danmurphys':
+                            if slug and stockcode:
+                                product_url = f"https://www.danmurphys.com.au/product/DM_{stockcode}/{slug}"
+                            elif slug:
+                                product_url = f"https://www.danmurphys.com.au/product/{slug}"
+                            else:
+                                product_url = f"https://www.danmurphys.com.au/buy/search-results/q={quote_plus(wine_name)}"
+                        elif brand == 'jimmybrings':
+                            if slug and stockcode:
+                                product_url = f"https://www.jimmybrings.com.au/product/JB_{stockcode}/{slug}"
+                            else:
+                                product_url = f"https://www.jimmybrings.com.au/search?q={quote_plus(wine_name)}"
+                        else:  # bws
+                            if slug and stockcode:
+                                product_url = f"https://www.bws.com.au/product/{stockcode}/{slug}"
+                            elif slug:
+                                product_url = f"https://www.bws.com.au/product/{slug}"
+                            else:
+                                product_url = f"https://www.bws.com.au/search?q={quote_plus(wine_name)}"
 
                         info = {
                             'wine': display_name,
