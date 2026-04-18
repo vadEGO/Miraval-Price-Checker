@@ -240,6 +240,8 @@
         .results-table .col-wine { font-weight: 600; color: #333; }
         .results-table .col-price { font-weight: 700; color: #11998e; }
         .results-table .col-location { color: #666; }
+        .results-table .col-link a { color: #667eea; text-decoration: none; font-size: .85rem; }
+        .results-table .col-link a:hover { text-decoration: underline; }
 
         .alert { padding: 15px 20px; border-radius: 10px; margin-bottom: 20px; display: none; }
         .alert.active { display: block; }
@@ -371,7 +373,7 @@
                 <div class="results-table-wrapper" id="resultsTableWrapper">
                     <table class="results-table" id="resultsTable">
                         <thead>
-                            <tr><th>Search Term</th><th>Wine</th><th>Price</th><th>Location</th></tr>
+                            <tr><th>Search Term</th><th>Wine</th><th>Price</th><th>Location</th><th>Link</th></tr>
                         </thead>
                         <tbody id="resultsBody"></tbody>
                     </table>
@@ -580,6 +582,7 @@ function displayResults(results) {
                 <td class="col-wine">${escapeHtml(r.wine)}</td>
                 <td class="col-price">${escapeHtml(r.price)}</td>
                 <td class="col-location">${escapeHtml(r.location)}</td>
+                <td class="col-link">${r.source_url ? `<a href="${escapeHtml(r.source_url)}" target="_blank" rel="noopener">View ↗</a>` : '-'}</td>
             </tr>
         `).join('');
     }
