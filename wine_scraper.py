@@ -180,12 +180,19 @@ class WineScraper:
             return False
 
         # --- Hard rule: colour/style words must match if present ---
+        # Exception: if the candidate has NO colour word at all (e.g. retailer omits
+        # "Rosé" from "Whispering Angel Rosé" → just "Whispering Angel"), we still
+        # accept the match provided the non-colour tokens strongly match, because the
+        # product category is implied by the brand name.
         query_colours = [t for t in query_tokens if t in self._COLOUR_STYLE]
         if query_colours:
-            candidate_tokens = set(candidate.split())
-            # "rose" in query should also accept "rosé" → both normalize to "rose"
-            if not any(c in candidate_tokens for c in query_colours):
-                return False
+            candidate_tokens_set = set(candidate.split())
+            candidate_has_any_colour = any(c in candidate_tokens_set for c in self._COLOUR_STYLE)
+            if candidate_has_any_colour:
+                # Candidate has a colour word — it must match the query colour
+                if not any(c in candidate_tokens_set for c in query_colours):
+                    return False
+            # else: candidate has no colour word at all — allow through (checked by token overlap)
 
         # --- Token overlap scoring ---
         meaningful_tokens = [t for t in query_tokens if t not in self._FILLER_WORDS]
@@ -205,13 +212,21 @@ class WineScraper:
         # Wine appellation/region words that retailers commonly append but don't
         # differentiate the product — e.g. "Miraval Rosé" == "Miraval Cotes de Provence Rosé"
         _APPELLATIONS = {
+            # French appellations & regions
             'cotes', 'du', 'rhone', 'rhône', 'provence', 'luberon', 'ventoux',
             'gigondas', 'vinsobres', 'chateauneuf', 'pape', 'villages',
             'languedoc', 'bordeaux', 'bourgogne', 'burgundy', 'alsace',
             'champagne', 'loire', 'val', 'medoc', 'graves', 'pessac',
             'leognan', 'pomerol', 'margaux', 'pauillac', 'sauternes',
+            # Australian regions
             'australia', 'barossa', 'valley', 'coonawarra', 'mclaren',
             'yarra', 'clare', 'eden', 'margaret', 'river', 'hunter',
+            # Estate/château prefixes retailers add to brand names
+            # e.g. "Château D'Esclans Whispering Angel" → query is just "Whispering Angel"
+            'chateau', 'domaine', 'maison', 'mas', 'cave', 'caves',
+            'estate', 'winery', 'cellars', 'cellier',
+            # Producer words that appear in retailer product titles but not in short queries
+            'esclans', 'perrin', 'famille',
         }
         _NOISE = self._FILLER_WORDS | _APPELLATIONS | {
             '750ml', '750', '700ml', '1l', '2024', '2025', '2023',
@@ -230,11 +245,10 @@ class WineScraper:
         return True
 
     def _search_endeavour_api(self, wine_name: str, brand: str) -> List[Dict]:
-        """Search BWS or Dan Murphy's via their JSON API (Endeavour Group).
+        """Search BWS or Jimmy Brings via the BWS JSON API (Endeavour Group).
 
-        Both BWS and DM share the same backend. BWS API reliably returns product
-        JSON; DM API returns a redirect for known brands, so we use BWS API for both
-        and flag products that are ranged to DM.
+        Uses Australia-wide inventory (backorder stock) so results reflect
+        national availability, not a single local store.
         """
         results = []
         api_configs = {
@@ -243,12 +257,6 @@ class WineScraper:
                 'origin': 'https://www.bws.com.au',
                 'referer': 'https://www.bws.com.au/',
                 'location': 'BWS',
-            },
-            'danmurphys': {
-                'api_url': 'https://api.bws.com.au/apis/ui/Search/products',
-                'origin': 'https://www.bws.com.au',
-                'referer': 'https://www.bws.com.au/',
-                'location': "Dan Murphy's",
             },
             'jimmybrings': {
                 'api_url': 'https://api.bws.com.au/apis/ui/Search/products',
@@ -286,54 +294,38 @@ class WineScraper:
 
             data = r.json()
 
-            # API returns a list of "packs", each with nested "Products"
             if isinstance(data, dict) and 'Products' in data:
                 packs = data['Products']
                 for pack in packs[:5]:
                     inner_products = pack.get('Products', [])
-                    for product in inner_products[:1]:  # First variant per pack
+                    for product in inner_products[:1]:
                         name = product.get('Name', '').strip()
-                        name = re.sub(r'<br\s*/?>', ' ', name)  # clean HTML
+                        name = re.sub(r'<br\s*/?>', ' ', name)
                         price = product.get('Price')
                         was_price = product.get('WasPrice')
                         on_special = product.get('IsOnSpecial', False)
                         size = product.get('PackageSize', '')
-                        available = product.get('IsAvailable', True)
+                        # Use backorder stock for Australia-wide availability
+                        stock_on_hand = (product.get('BackorderStockOnHand') or
+                                         product.get('StockOnHand') or 0)
+                        available = bool(stock_on_hand) or product.get('IsAvailable', False)
 
                         if not name:
                             continue
                         if not self._is_relevant_match(wine_name, name):
                             continue
 
-                        # Extract additional details (rangedtodm, bwsproducturl, etc.)
-                        ranged_to_dm = False
                         bws_product_slug = None
                         for detail in product.get('AdditionalDetails', []):
                             dname = detail.get('Name', '').lower()
                             dval = str(detail.get('Value', ''))
-                            if dname == 'rangedtodm':
-                                ranged_to_dm = dval.lower() == 'yes'
-                            elif dname == 'bwsproducturl':
+                            if dname == 'bwsproducturl':
                                 bws_product_slug = dval.strip()
 
-                        location = config['location']
-                        if brand == 'danmurphys' and not ranged_to_dm:
-                            continue  # Skip products not available at DM
-
-                        display_name = f"{name} {size}".strip() if size else name
-                        price_str = f"${price:.2f}" if price else "N/A"
-
-                        # Build the correct product URL per retailer
                         stockcode = product.get('Stockcode') or product.get('ParentStockCode')
                         slug = bws_product_slug or product.get('UrlFriendlyName', '')
-                        if brand == 'danmurphys':
-                            if slug and stockcode:
-                                product_url = f"https://www.danmurphys.com.au/product/DM_{stockcode}/{slug}"
-                            elif slug:
-                                product_url = f"https://www.danmurphys.com.au/product/{slug}"
-                            else:
-                                product_url = f"https://www.danmurphys.com.au/buy/search-results/q={quote_plus(wine_name)}"
-                        elif brand == 'jimmybrings':
+
+                        if brand == 'jimmybrings':
                             if slug and stockcode:
                                 product_url = f"https://www.jimmybrings.com.au/product/JB_{stockcode}/{slug}"
                             else:
@@ -346,26 +338,20 @@ class WineScraper:
                             else:
                                 product_url = f"https://www.bws.com.au/search?q={quote_plus(wine_name)}"
 
-                        info = {
+                        display_name = f"{name} {size}".strip() if size else name
+                        price_str = f"${price:.2f}" if price else "N/A"
+                        if on_special and was_price and price and was_price > price:
+                            price_str = f"${price:.2f} (was ${was_price:.2f})"
+                        if not available:
+                            price_str += " [Out of Stock]"
+
+                        results.append({
                             'wine': display_name,
                             'price': price_str,
-                            'location': location,
+                            'location': config['location'],
                             'source_url': product_url,
                             'in_stock': bool(available),
-                        }
-
-                        # Add sale info
-                        if on_special and was_price and price and was_price > price:
-                            info['price'] = f"${price:.2f} (was ${was_price:.2f})"
-
-                        if not available:
-                            info['price'] += " [Out of Stock]"
-
-                        results.append(info)
-
-            elif isinstance(data, list):
-                # Redirect response (DM returns this for known brands)
-                print(f"    API returned redirect, no inline products")
+                        })
 
         except Exception as e:
             print(f"    ✗ API error: {e}")
@@ -373,8 +359,102 @@ class WineScraper:
         return results[:5]
 
     def search_dan_murphys(self, wine_name: str) -> List[Dict]:
-        """Search Dan Murphy's via Endeavour Group API."""
-        return self._search_endeavour_api(wine_name, 'danmurphys')
+        """Search Dan Murphy's via their own JSON API.
+
+        Uses Australia-wide (national) inventory so results reflect
+        what is available for delivery anywhere in Australia.
+        """
+        results = []
+        headers = {
+            'User-Agent': self.headers['User-Agent'],
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-AU,en;q=0.9',
+            'Origin': 'https://www.danmurphys.com.au',
+            'Referer': 'https://www.danmurphys.com.au/',
+        }
+        try:
+            params = {'searchTerm': wine_name, 'pageSize': 10}
+            if CURL_CFFI_AVAILABLE:
+                r = cffi_requests.get(
+                    'https://api.danmurphys.com.au/apis/ui/Search/products',
+                    headers=headers, params=params, timeout=15, impersonate='chrome',
+                )
+            else:
+                r = requests.get(
+                    'https://api.danmurphys.com.au/apis/ui/Search/products',
+                    headers=headers, params=params, timeout=15,
+                )
+
+            if r.status_code != 200:
+                print(f"    ⚠ DM API returned HTTP {r.status_code}")
+                return results
+
+            data = r.json()
+            if not (isinstance(data, dict) and 'Products' in data):
+                return results
+
+            for pack in data['Products'][:5]:
+                inner = pack.get('Products', [])
+                for product in inner[:1]:
+                    name = re.sub(r'<br\s*/?>', ' ', pack.get('Name', ''))
+                    name = re.sub(r'\s+', ' ', name.replace('\n', ' ')).strip()
+                    if not name:
+                        name = product.get('UrlFriendlyName', '').replace('-', ' ').title()
+                    if not name or not self._is_relevant_match(wine_name, name):
+                        continue
+
+                    # DM uses a Prices dict with singleprice / promoprice
+                    prices = product.get('Prices', {})
+                    single = prices.get('singleprice', {})
+                    member = prices.get('promoprice', {})
+                    single_val = single.get('Value')
+                    member_val = member.get('Value') if member.get('IsMemberOffer') else None
+
+                    if single_val:
+                        price_str = f"${single_val:.2f}"
+                        if member_val and member_val < single_val:
+                            price_str += f" (member ${member_val:.2f})"
+                    else:
+                        price_str = "N/A"
+
+                    size = product.get('PackageSize', '')
+                    display_name = f"{name} {size}".strip() if size else name
+
+                    # Australia-wide: use backorder inventory
+                    inv = product.get('Inventory', {})
+                    stock = (inv.get('backorderavailableinventoryqty') or
+                             inv.get('availableinventoryqty') or
+                             product.get('StockOnHand') or 0)
+                    available = bool(stock)
+                    if not available:
+                        price_str += " [Out of Stock]"
+
+                    stockcode = product.get('Stockcode') or product.get('ParentStockCode')
+                    slug = product.get('UrlFriendlyName', '')
+                    # DM uses dm_stockcode from AdditionalDetails for the URL
+                    dm_code = None
+                    for d in product.get('AdditionalDetails', []):
+                        if d.get('Name', '').lower() == 'dm_stockcode':
+                            dm_code = d.get('Value', '').strip()
+                    if slug and dm_code:
+                        product_url = f"https://www.danmurphys.com.au/product/{dm_code}/{slug}"
+                    elif slug and stockcode:
+                        product_url = f"https://www.danmurphys.com.au/product/DM_{stockcode}/{slug}"
+                    else:
+                        product_url = f"https://www.danmurphys.com.au/buy/search-results/q={quote_plus(wine_name)}"
+
+                    results.append({
+                        'wine': display_name,
+                        'price': price_str,
+                        'location': "Dan Murphy's",
+                        'source_url': product_url,
+                        'in_stock': bool(available),
+                    })
+
+        except Exception as e:
+            print(f"    ✗ DM API error: {e}")
+
+        return results[:5]
 
     def search_bws(self, wine_name: str) -> List[Dict]:
         """Search BWS via Endeavour Group API."""

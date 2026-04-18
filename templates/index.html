@@ -395,7 +395,7 @@ let sheetsReady = false;
 let wineCatalog = [];
 let trackedCatalog = [];
 let competitorCatalog = [];
-const selectedWines = new Set(["Miraval Rosé"]);
+const selectedWines = new Set();
 
 /* ================================================================
    Helpers
@@ -723,17 +723,16 @@ async function loadCatalog() {
         wineCatalog = data.wines;
         trackedCatalog = Array.isArray(data.tracked_wines) ? data.tracked_wines : data.wines;
         competitorCatalog = Array.isArray(data.competitor_wines) ? data.competitor_wines : [];
-        if (!wineCatalog.some(w => selectedWines.has(w))) {
-            selectedWines.clear();
-            selectedWines.add((trackedCatalog[0] || wineCatalog[0]));
+        // Pre-select all wines (tracked + competitors) by default
+        if (selectedWines.size === 0) {
+            wineCatalog.forEach(w => selectedWines.add(w));
         }
     } catch (e) {
         showAlert('Unable to load tracked wine catalog: ' + e.message, 'error');
         wineCatalog = ['Miraval Rosé'];
         trackedCatalog = ['Miraval Rosé'];
-        competitorCatalog = ['Minuty M Provence Rosé 750mL'];
-        selectedWines.clear();
-        selectedWines.add('Miraval Rosé');
+        competitorCatalog = ['Minuty M Provence Rosé', 'Whispering Angel Rosé'];
+        wineCatalog.forEach(w => selectedWines.add(w));
     }
 }
 

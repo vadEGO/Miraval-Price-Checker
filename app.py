@@ -67,12 +67,12 @@ DEFAULT_WINE_CATALOG = [
     "Fleur de Miraval",
 ]
 DEFAULT_COMPETITOR_WINES = [
-    "Minuty M Provence Rosé 750mL",
-    "Whispering Angel Rosé 750mL",
-    "Château d'Esclans Rock Angel Rosé 750mL",
-    "AIX Rosé 750mL",
-    "Maison Saint Aix Provence Rosé 750mL",
-    "Mirabeau Classic Rosé 750mL",
+    "Minuty M Provence Rosé",
+    "Whispering Angel Rosé",
+    "Château d'Esclans Rock Angel Rosé",
+    "AIX Rosé",
+    "Maison Saint Aix Provence Rosé",
+    "Mirabeau Classic Rosé",
 ]
 
 
