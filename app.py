@@ -230,15 +230,6 @@ def index():
 # Routes — search
 # =====================================================================
 
-def get_demo_results(wine_name: str):
-    return [
-        {'wine': 'Miraval Côtes de Provence Rosé 750ml', 'price': '$34.99', 'location': "Dan Murphy's"},
-        {'wine': 'Miraval Provence Rosé 2024', 'price': '$36.00', 'location': 'BWS'},
-        {'wine': 'Miraval Château de Miraval Rosé', 'price': '$32.50', 'location': 'Liquorland'},
-        {'wine': 'Miraval Brad Pitt Rosé 750ml', 'price': '$38.00', 'location': 'First Choice'},
-    ]
-
-
 @app.route('/api/search', methods=['POST'])
 def search_wines():
     global scraper
@@ -254,7 +245,6 @@ def search_wines():
 
         wine_name = data.get('wine_name', '').strip()
         wine_names = data.get('wine_names', [])
-        use_demo = data.get('demo', False)
 
         normalized_names = []
         seen = set()
@@ -271,20 +261,6 @@ def search_wines():
 
         if not normalized_names:
             return jsonify({'error': 'Please select at least one wine'}), 400
-
-        if use_demo:
-            results = []
-            for selected_name in normalized_names:
-                for row in get_demo_results(selected_name):
-                    results.append({**row, 'query': selected_name})
-            print(f"✓ Demo mode: {len(results)} sample results for {len(normalized_names)} wine(s)")
-            return jsonify({
-                'success': True, 'results': results, 'count': len(results),
-                'searched_wines': normalized_names, 'searched_count': len(normalized_names), 'demo': True,
-            })
-
-        if not scraper:
-            return jsonify({'error': 'Scraper not initialised. Check config.json.'}), 500
 
         search_id = str(uuid.uuid4())[:8]
         print(f"\n🔍 Searching {len(normalized_names)} wine(s)… [id={search_id}]")

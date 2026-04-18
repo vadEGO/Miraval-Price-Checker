@@ -153,8 +153,7 @@
         .btn-primary:disabled { opacity: .6; cursor: not-allowed; }
         .btn-success { background: #2f2f35; color: #f2f2f4; }
         .btn-success:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(17,153,142,.4); }
-        .btn-demo { background: #f4f1ec; color: #2f2f35; border: 1px solid #d6d2ce; }
-        .btn-demo:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(245,87,108,.4); }
+
 
         /* ── Loading / results ─────────────────────────────────── */
         .loading { display: none; text-align: center; padding: 30px 20px; }
@@ -346,10 +345,9 @@
                         <div class="selected-chips" id="selectedChips"></div>
                     </div>
                     <button type="submit" class="btn btn-primary" id="searchBtn">Search</button>
-                    <button type="button" class="btn btn-demo" id="demoBtn" title="Load sample results to test the app">Try Demo</button>
                 </form>
                 <p style="font-size:.85rem;color:#666;margin-top:8px;">
-                    Track Miraval & Famille Perrin, then benchmark against Provence competitors like <strong>Minuty M</strong>. <strong>Try Demo</strong> uses sample data.
+                    Track Miraval &amp; Famille Perrin, then benchmark against Provence competitors like <strong>Minuty M</strong>.
                 </p>
             </div>
 
@@ -640,36 +638,32 @@ function updateProgressStats(siteIndex, totalSites, resultsSoFar) {
         (resultsSoFar > 0 ? ` · ${resultsSoFar} result${resultsSoFar !== 1 ? 's' : ''} so far` : '');
 }
 
-async function doSearch(wineNames, useDemo = false) {
+async function doSearch(wineNames) {
     const searchBtn = document.getElementById('searchBtn');
-    const demoBtn = document.getElementById('demoBtn');
     const loading = document.getElementById('loading');
 
     searchBtn.disabled = true;
-    demoBtn.disabled = true;
     loading.classList.add('active');
     document.getElementById('resultsSection').classList.remove('active');
     document.getElementById('progressFill').style.width = '0%';
     document.getElementById('progressStats').textContent = '';
 
-    if (!useDemo) {
-        await loadSiteList();
-        initCarousel();
-    }
+    await loadSiteList();
+    initCarousel();
 
     try {
         const ctrl = new AbortController();
-        const timeout = setTimeout(() => ctrl.abort(), useDemo ? 5000 : 300000);
+        const timeout = setTimeout(() => ctrl.abort(), 300000);
 
         const fetchPromise = fetch('/api/search', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ wine_names: wineNames, demo: useDemo }),
+            body: JSON.stringify({ wine_names: wineNames }),
             signal: ctrl.signal,
         });
 
         let fallbackTimer = null;
-        if (!useDemo && _carouselSites.length) {
+        if (_carouselSites.length) {
             showCarouselItem(0);
             updateProgressBar(0, _carouselSites.length);
             updateProgressStats(0, _carouselSites.length, 0);
@@ -697,11 +691,9 @@ async function doSearch(wineNames, useDemo = false) {
             displayResults(data.results);
             const siteCount = _carouselSites.length || '?';
             if (data.count > 0) {
-                showAlert(useDemo
-                    ? `Demo: ${data.count} sample result${data.count !== 1 ? 's' : ''} loaded`
-                    : `Found ${data.count} result${data.count !== 1 ? 's' : ''} across ${siteCount} sites`, 'success');
-            } else if (!useDemo) {
-                showAlert('No results found. Try "Try Demo" for sample data.', 'info');
+                showAlert(`Found ${data.count} result${data.count !== 1 ? 's' : ''} across ${siteCount} sites`, 'success');
+            } else {
+                showAlert('No results found for the selected wines.', 'info');
             }
         } else {
             showAlert(data.error || 'Error searching', 'error');
@@ -710,7 +702,6 @@ async function doSearch(wineNames, useDemo = false) {
         showAlert(e.name === 'AbortError' ? 'Search timed out.' : 'Network error: ' + e.message, 'error');
     } finally {
         searchBtn.disabled = false;
-        demoBtn.disabled = false;
         loading.classList.remove('active');
     }
 }
@@ -734,7 +725,7 @@ async function loadCatalog() {
         showAlert('Unable to load tracked wine catalog: ' + e.message, 'error');
         wineCatalog = ['Miraval Rosé'];
         trackedCatalog = ['Miraval Rosé'];
-        competitorCatalog = ['Minuty M Provence Rosé', 'Whispering Angel Rosé'];
+        competitorCatalog = ['Minuty M Provence Rosé', 'Whispering Angel Rosé', 'AIX Rosé'];
         wineCatalog.forEach(w => selectedWines.add(w));
     }
 }
@@ -746,13 +737,7 @@ document.getElementById('searchForm').addEventListener('submit', async e => {
     e.preventDefault();
     const wines = Array.from(selectedWines);
     if (!wines.length) { showAlert('Please select at least one wine', 'error'); return; }
-    await doSearch(wines, false);
-});
-
-document.getElementById('demoBtn').addEventListener('click', async () => {
-    let wines = Array.from(selectedWines);
-    if (!wines.length) wines = ['Miraval Rosé'];
-    await doSearch(wines, true);
+    await doSearch(wines);
 });
 
 document.getElementById('addToSheetBtn').addEventListener('click', async () => {
