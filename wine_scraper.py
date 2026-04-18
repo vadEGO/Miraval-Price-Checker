@@ -21,6 +21,7 @@ import requests
 from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Try to import curl_cffi for TLS fingerprint impersonation (bypasses 403 blocks)
 try:
@@ -688,15 +689,13 @@ class WineScraper:
         return cfg["label"] if cfg else site_key
 
     def search_all_sites(self, wine_name: str, progress_callback=None) -> List[Dict]:
-        """Search all configured wine sites.
+        """Search all configured wine sites in parallel.
 
         Args:
             wine_name: Wine to search for.
             progress_callback: Optional callable(site_key, site_index, total_sites, results_so_far)
-                               invoked before each site is searched.
+                               invoked as each site completes.
         """
-        all_results = []
-
         site_handlers = {
             'danmurphys.com.au': self.search_dan_murphys,
             'bws.com.au': self.search_bws,
@@ -707,24 +706,42 @@ class WineScraper:
         }
 
         total = len(self.wine_sites)
-        for idx, site in enumerate(self.wine_sites):
-            if progress_callback:
-                progress_callback(site, idx, total, len(all_results))
-            print(f"Searching {site}...")
-            try:
-                handler = site_handlers.get(site)
-                if handler:
-                    results = handler(wine_name)
-                elif site in self.INDEPENDENT_SITE_CONFIG:
-                    results = self.search_independent_site(wine_name, site)
-                else:
-                    print(f"  ⚠ Site not configured: {site}")
-                    results = []
-                print(f"  ✓ Found {len(results)} results from {site}")
-                all_results.extend(results)
-            except Exception as e:
-                print(f"  ✗ Error searching {site}: {e}")
-            time.sleep(0.3)
+        all_results = []
+        completed = 0
+
+        def _search_one(site):
+            handler = site_handlers.get(site)
+            if handler:
+                return site, handler(wine_name)
+            elif site in self.INDEPENDENT_SITE_CONFIG:
+                return site, self.search_independent_site(wine_name, site)
+            return site, []
+
+        # API-backed sites (fast, no rate-limit concerns) run at full concurrency;
+        # HTML scrapers run with a modest cap to avoid hammering sites.
+        api_sites = [s for s in self.wine_sites if s in site_handlers]
+        html_sites = [s for s in self.wine_sites if s not in site_handlers]
+
+        futures_map = {}
+        executor = ThreadPoolExecutor(max_workers=10)
+
+        for site in api_sites + html_sites:
+            futures_map[executor.submit(_search_one, site)] = site
+
+        try:
+            for future in as_completed(futures_map):
+                site = futures_map[future]
+                try:
+                    _, results = future.result()
+                    print(f"  ✓ {site}: {len(results)} result(s)")
+                    all_results.extend(results)
+                except Exception as e:
+                    print(f"  ✗ {site}: {e}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(site, completed - 1, total, len(all_results))
+        finally:
+            executor.shutdown(wait=False)
 
         print(f"\nTotal results found: {len(all_results)}")
         return all_results
