@@ -14,8 +14,10 @@ import sys
 import re
 import time
 import unicodedata
+import hashlib
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -29,7 +31,7 @@ try:
     CURL_CFFI_AVAILABLE = True
 except ImportError:
     CURL_CFFI_AVAILABLE = False
-    print("⚠ curl_cffi not installed - run: pip install curl_cffi")
+    print("⚠ curl_cffi not installed - run: pip install curl_cffi", file=sys.stderr)
 
 
 class WineScraper:
@@ -121,6 +123,7 @@ class WineScraper:
 
         self.wine_sites = self.config.get('wine_sites', [])
         self.use_selenium = False  # No longer needed - using APIs + curl_cffi instead
+        self._last_fetch_error = ""
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                           'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -171,10 +174,10 @@ class WineScraper:
         candidate = self._normalize_text(candidate_name)
         if not query or not candidate:
             return False
-
-        # Fast-path: exact phrase match
-        if query in candidate:
-            return True
+        query_years = set(re.findall(r"\b(?:19|20)\d{2}\b", query))
+        candidate_years = set(re.findall(r"\b(?:19|20)\d{2}\b", candidate))
+        if query_years and query_years != candidate_years:
+            return False
 
         query_tokens = [t for t in query.split() if len(t) > 1]
         if not query_tokens:
@@ -201,7 +204,8 @@ class WineScraper:
             meaningful_tokens = query_tokens
 
         meaningful_set = set(meaningful_tokens)
-        overlap = sum(1 for t in meaningful_tokens if t in candidate)
+        candidate_set = set(candidate.split())
+        overlap = sum(1 for t in meaningful_tokens if t in candidate_set)
 
         # Require majority overlap
         required = max(1, len(meaningful_tokens) // 2 + 1)  # e.g. 3 of 5, 2 of 3, 1 of 1
@@ -234,7 +238,10 @@ class WineScraper:
             '2022', '2021', '2020', '2019', '2018', 'nv', 'each',
             'bottle', 'pack', '6pk', '12pk', 'case', 'single',
         }
-        candidate_tokens = [t for t in candidate.split() if len(t) > 1 and t not in _NOISE]
+        candidate_tokens = [
+            t for t in candidate.split()
+            if len(t) > 1 and t not in _NOISE and not re.fullmatch(r"(?:19|20)\d{2}", t)
+        ]
         extra = [t for t in candidate_tokens if t not in meaningful_set]
         # For short queries (≤3 meaningful tokens), zero tolerance for extra differentiating
         # words — "Miraval Rosé" must NOT match "Miraval Studio Rosé".
@@ -477,35 +484,277 @@ class WineScraper:
 
         Priority: curl_cffi (TLS impersonation) > plain requests
         """
+        self._last_fetch_error = ""
+        retryable_statuses = {408, 429, 500, 502, 503, 504}
+
+        def request_with_retry(label, request_call):
+            for attempt in range(3):
+                try:
+                    response = request_call()
+                    if response.status_code == 200:
+                        return response.text
+                    self._last_fetch_error = (
+                        f"{label} returned HTTP {response.status_code}"
+                    )
+                    if response.status_code not in retryable_statuses:
+                        break
+                except Exception as exc:
+                    self._last_fetch_error = f"{label} request failed: {exc}"
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+            return None
+
         # Method 1: curl_cffi with Chrome TLS impersonation
         if CURL_CFFI_AVAILABLE:
-            try:
-                print(f"    Fetching {url} (impersonating Chrome)...")
-                response = cffi_requests.get(
+            print(f"    Fetching {url} (impersonating Chrome)...")
+            content = request_with_retry(
+                "Chrome-compatible fetch",
+                lambda: cffi_requests.get(
                     url, headers=self.headers, timeout=15,
                     impersonate="chrome", allow_redirects=True,
-                )
-                if response.status_code == 200:
-                    return response.text
-                elif response.status_code == 403:
-                    print(f"    ⚠ 403 even with impersonation")
-                else:
-                    print(f"    ⚠ HTTP {response.status_code}")
-            except Exception as e:
-                print(f"    ✗ curl_cffi error: {e}")
+                ),
+            )
+            if content is not None:
+                return content
+            print(f"    ⚠ {self._last_fetch_error}")
 
         # Method 2: Plain requests (may get 403 on protected sites)
-        try:
-            print(f"    Fetching {url} (plain request)...")
-            response = requests.get(url, headers=self.headers, timeout=10)
-            if response.status_code == 403:
-                print(f"    ⚠ Site blocked (403) - install curl_cffi: pip install curl_cffi")
-                return None
-            response.raise_for_status()
-            return response.text
-        except Exception as e:
-            print(f"    ✗ Request error: {e}")
+        print(f"    Fetching {url} (plain request)...")
+        content = request_with_retry(
+            "Plain fetch",
+            lambda: requests.get(
+                url, headers=self.headers, timeout=10, allow_redirects=True
+            ),
+        )
+        if content is None:
+            print(f"    ✗ {self._last_fetch_error}")
+        return content
+
+    _CHALLENGE_MARKERS = (
+        "captcha", "access denied", "verify you are human", "cf-chl-",
+        "attention required! | cloudflare",
+        "perimeterx", "shieldsquare", "bot detection", "security challenge",
+    )
+
+    @staticmethod
+    def _size_in_ml(value: str) -> Optional[float]:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*(ml|cl|l)\b", value or "", re.I)
+        if not match:
             return None
+        amount = float(match.group(1))
+        unit = match.group(2).lower()
+        return amount * {"ml": 1, "cl": 10, "l": 1000}[unit]
+
+    @staticmethod
+    def _json_nodes(value):
+        if isinstance(value, dict):
+            yield value
+            for child in value.values():
+                yield from WineScraper._json_nodes(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from WineScraper._json_nodes(child)
+
+    def extract_product_page(self, html: str, url: str, wine_name: str,
+                             retailer: str, expected_bottle_size: str = "") -> Dict:
+        """Extract one exact product page without inferring ambiguous prices."""
+        base = {
+            "product_name": "",
+            "price_amount": None,
+            "regular_price_amount": None,
+            "currency": "",
+            "in_stock": None,
+            "status": "needs_review",
+            "error": "",
+        }
+        lowered = (html or "").lower()
+        if not html:
+            return {**base, "status": "error", "error": "Empty retailer response"}
+        if any(marker in lowered for marker in self._CHALLENGE_MARKERS):
+            return {
+                **base,
+                "status": "error",
+                "error": "Retailer returned a bot challenge instead of a product page",
+            }
+
+        soup = BeautifulSoup(html, "html.parser")
+        product_nodes = []
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                payload = json.loads(script.string or script.get_text() or "")
+                for node in self._json_nodes(payload):
+                    node_type = node.get("@type", "")
+                    node_types = node_type if isinstance(node_type, list) else [node_type]
+                    if any(str(value).lower() == "product" for value in node_types):
+                        product_nodes.append(node)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+
+        matching_nodes = [
+            node for node in product_nodes
+            if self._is_relevant_match(wine_name, str(node.get("name", "")))
+        ]
+        product = (matching_nodes or product_nodes or [{}])[0]
+        product_name = str(product.get("name", "")).strip()
+        if not product_name:
+            heading = soup.find("h1")
+            product_name = heading.get_text(" ", strip=True) if heading else ""
+        if not product_name:
+            title_meta = soup.find("meta", property="og:title")
+            product_name = (title_meta or {}).get("content", "").strip()
+        base["product_name"] = product_name[:200]
+        if not product_name:
+            base["error"] = "No product title could be validated"
+            return base
+
+        offers = product.get("offers", {})
+        if isinstance(offers, list):
+            offer_list = [item for item in offers if isinstance(item, dict)]
+        elif isinstance(offers, dict):
+            offer_list = [offers]
+        else:
+            offer_list = []
+
+        amounts = []
+        member_amounts = []
+        currency = ""
+        explicit_dollar_price = False
+        availability_text = ""
+        for offer in offer_list:
+            candidate = offer.get("price", offer.get("lowPrice"))
+            try:
+                if candidate not in (None, ""):
+                    amount = float(str(candidate).replace(",", ""))
+                    offer_text = " ".join(str(offer.get(key, "")) for key in (
+                        "name", "description", "eligibleCustomerType", "priceType"
+                    ))
+                    if re.search(r"\b(members?|loyalty|club)\b", offer_text, re.I):
+                        member_amounts.append(amount)
+                    else:
+                        amounts.append(amount)
+            except (TypeError, ValueError):
+                pass
+            currency = currency or str(offer.get("priceCurrency", "")).upper()
+            availability_text += " " + str(offer.get("availability", "")).lower()
+
+        if not amounts and not member_amounts:
+            price_meta = (
+                soup.find("meta", attrs={"itemprop": "price"})
+                or soup.find("meta", property="product:price:amount")
+            )
+            raw_meta_price = (price_meta or {}).get("content", "")
+            try:
+                if raw_meta_price:
+                    amounts.append(float(str(raw_meta_price).replace(",", "")))
+            except (TypeError, ValueError):
+                pass
+            currency_meta = (
+                soup.find("meta", attrs={"itemprop": "priceCurrency"})
+                or soup.find("meta", property="product:price:currency")
+            )
+            currency = currency or (currency_meta or {}).get("content", "").upper()
+
+        if not amounts and not member_amounts:
+            price_elements = soup.find_all(
+                ["span", "div", "p"],
+                class_=re.compile(r"(^|[-_\s])(sale-)?price($|[-_\s])", re.I),
+            )
+            for element in price_elements[:10]:
+                text = element.get_text(" ", strip=True)
+                if re.search(r"\b(save|saving|off)\b", text, re.I):
+                    continue
+                match = re.search(r"\$\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)", text)
+                if match:
+                    amounts.append(float(match.group(1).replace(",", "")))
+                    explicit_dollar_price = True
+
+        unique_amounts = sorted({value for value in amounts if 5 <= value <= 1000})
+        if not unique_amounts and member_amounts:
+            base["error"] = "Only a member or loyalty price was found"
+            return base
+        if unique_amounts:
+            base["price_amount"] = unique_amounts[0]
+            if len(unique_amounts) > 1:
+                base["regular_price_amount"] = unique_amounts[-1]
+            base["currency"] = currency or ("AUD" if explicit_dollar_price else "")
+
+        page_text = soup.get_text(" ", strip=True)
+        combined_identity = f"{product_name} {page_text[:5000]}"
+        expected_ml = self._size_in_ml(expected_bottle_size)
+        observed_sizes = {
+            self._size_in_ml(match.group(0))
+            for match in re.finditer(r"\d+(?:\.\d+)?\s*(?:ml|cl|l)\b", combined_identity, re.I)
+        }
+        observed_sizes.discard(None)
+        if expected_ml and expected_ml not in observed_sizes:
+            base["error"] = (
+                f"Expected {expected_bottle_size}, but that bottle size was not "
+                "confirmed on the product page"
+            )
+            return base
+
+        pack_pattern = (
+            r"\b(case|dozen|pack\s+of\s+\d+|\d+\s*pk|\d+\s+bottles?|"
+            r"\d+\s*x\s*\d+\s*(?:ml|cl|l))\b"
+        )
+        if re.search(pack_pattern, f"{product_name} {page_text[:5000]}", re.I):
+            base["error"] = "Product appears to be a multi-bottle pack or case"
+            return base
+
+        if wine_name and product_name and not self._is_relevant_match(wine_name, product_name):
+            base["error"] = "Product title does not match the catalog wine name"
+            return base
+
+        if availability_text.strip():
+            normalized_availability = availability_text.replace("/", "")
+            out_of_stock = "outofstock" in normalized_availability
+            in_stock = "instock" in normalized_availability and not out_of_stock
+        else:
+            out_of_stock = bool(
+                re.search(r"\b(out of stock|sold out|unavailable)\b", page_text, re.I)
+            )
+            in_stock = bool(
+                re.search(r"\b(in stock|available now)\b", page_text, re.I)
+            )
+        base["in_stock"] = False if out_of_stock else (True if in_stock else None)
+
+        if out_of_stock:
+            base["status"] = "unavailable"
+            return base
+        if base["price_amount"] is None:
+            base["error"] = "No explicit product price could be validated"
+            return base
+        if base["currency"] != "AUD":
+            base["error"] = f"Expected AUD pricing, found {base['currency'] or 'no currency'}"
+            return base
+        if base["in_stock"] is None:
+            base["error"] = "Product availability could not be validated"
+            return base
+
+        base["status"] = "success"
+        return base
+
+    def fetch_product_url(self, url: str, wine_name: str, retailer: str,
+                          expected_bottle_size: str = "") -> Dict:
+        """Fetch and validate one catalog URL."""
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            return {
+                "product_name": "",
+                "price_amount": None,
+                "regular_price_amount": None,
+                "currency": "",
+                "in_stock": None,
+                "status": "error",
+                "error": "Product URL must be an absolute HTTPS URL",
+            }
+        html = self._get_page_content(url)
+        result = self.extract_product_page(
+            html or "", url, wine_name, retailer, expected_bottle_size
+        )
+        if not html and self._last_fetch_error:
+            result["error"] = self._last_fetch_error
+        return result
 
     def _extract_product_info(self, product_element, location: str,
                                wine_search_term: str = "") -> Optional[Dict]:
@@ -585,10 +834,14 @@ class WineScraper:
 
             # Format price
             if price:
-                pm = re.search(r'\$?\s*(\d+\.?\d*)', str(price))
+                price_text = str(price).strip()
+                pm = re.search(r'\$\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)', price_text)
+                if not pm:
+                    pm = re.fullmatch(r'\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*', price_text)
                 if pm:
-                    pv = float(pm.group(1))
-                    formatted_price = f"${pm.group(1)}" if 5 <= pv <= 500 else "N/A"
+                    numeric = pm.group(1).replace(',', '')
+                    pv = float(numeric)
+                    formatted_price = f"${numeric}" if 5 <= pv <= 500 else "N/A"
                 else:
                     formatted_price = str(price)
             else:
@@ -759,6 +1012,18 @@ class GoogleSheetsWriter:
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive.file',
     ]
+    CATALOG_WORKSHEET = "Wine Catalog"
+    HISTORY_WORKSHEET = "Price History"
+    CATALOG_HEADERS = [
+        "Wine ID", "Wine Name", "Retailer", "Product URL",
+        "Expected Bottle Size", "Enabled", "Latest Price", "Currency",
+        "In Stock", "Last Checked UTC", "Status", "Error",
+    ]
+    HISTORY_HEADERS = [
+        "Observation ID", "Run ID", "Wine ID", "Wine Name", "Retailer",
+        "Price Amount", "Regular Price Amount", "Currency", "In Stock",
+        "Source URL", "Observed At UTC", "Status", "Error",
+    ]
 
     def __init__(self, credentials=None, credentials_path: str = None,
                  sheet_id: str = None, worksheet_name: str = "Wine Prices"):
@@ -766,6 +1031,8 @@ class GoogleSheetsWriter:
         self.worksheet_name = worksheet_name
         self.spreadsheet = None
         self.worksheet = None
+        self.catalog_worksheet = None
+        self.history_worksheet = None
 
         if credentials is not None:
             # OAuth credentials object (already authenticated)
@@ -782,62 +1049,235 @@ class GoogleSheetsWriter:
             self._open_sheet(sheet_id, worksheet_name)
 
     def _open_sheet(self, sheet_id: str, worksheet_name: str = "Wine Prices"):
-        """Open an existing spreadsheet by ID."""
+        """Open an existing spreadsheet and validate tracking worksheets."""
         self.sheet_id = sheet_id
         self.worksheet_name = worksheet_name
         self.spreadsheet = self.client.open_by_key(sheet_id)
+        self.ensure_tracking_schema()
+
+    def _ensure_worksheet(self, title: str, headers: List[str]):
         try:
-            self.worksheet = self.spreadsheet.worksheet(worksheet_name)
+            worksheet = self.spreadsheet.worksheet(title)
         except gspread.exceptions.WorksheetNotFound:
-            self.worksheet = self.spreadsheet.add_worksheet(
-                title=worksheet_name, rows=1000, cols=10)
-            self.worksheet.append_row([
-                'Search Term', 'Wine', 'Price', 'Location', 'Date',
-                'Scraped At', 'Source URL', 'In Stock',
-            ])
+            worksheet = self.spreadsheet.add_worksheet(
+                title=title, rows=1000, cols=len(headers)
+            )
+        existing = worksheet.row_values(1)
+        if not existing:
+            worksheet.append_row(headers)
+            worksheet.format(
+                f"A1:{self._column_letter(len(headers))}1",
+                {"textFormat": {"bold": True}},
+            )
+            worksheet.freeze(rows=1)
+        elif existing != headers:
+            raise ValueError(
+                f"Worksheet '{title}' has an unexpected schema. "
+                f"Expected headers: {', '.join(headers)}"
+            )
+        return worksheet
+
+    def ensure_tracking_schema(self):
+        if not self.spreadsheet:
+            raise ValueError("No spreadsheet is open")
+        self.catalog_worksheet = self._ensure_worksheet(
+            self.CATALOG_WORKSHEET, self.CATALOG_HEADERS
+        )
+        self.history_worksheet = self._ensure_worksheet(
+            self.HISTORY_WORKSHEET, self.HISTORY_HEADERS
+        )
+        self.worksheet = self.history_worksheet
 
     def create_spreadsheet(self, title: str = "Wine Prices – Miraval Price Checker"):
         """Create a new spreadsheet and set it as active. Returns metadata dict."""
         spreadsheet = self.client.create(title)
         self.spreadsheet = spreadsheet
         self.sheet_id = spreadsheet.id
-        self.worksheet = spreadsheet.sheet1
-        self.worksheet.update_title("Wine Prices")
-        self.worksheet.append_row([
-            'Search Term', 'Wine', 'Price', 'Location', 'Date',
-            'Scraped At', 'Source URL', 'In Stock',
-        ])
-        # Auto-bold header row and freeze it
-        self.worksheet.format('A1:H1', {'textFormat': {'bold': True}})
-        self.worksheet.freeze(rows=1)
+        spreadsheet.sheet1.update_title(self.CATALOG_WORKSHEET)
+        self.ensure_tracking_schema()
         return {
             'id': spreadsheet.id,
             'url': spreadsheet.url,
             'title': spreadsheet.title,
         }
 
+    @staticmethod
+    def _enabled(value) -> bool:
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "enabled"}
+
+    @staticmethod
+    def _column_letter(number: int) -> str:
+        letters = ""
+        while number:
+            number, remainder = divmod(number - 1, 26)
+            letters = chr(65 + remainder) + letters
+        return letters
+
+    def read_catalog(self, enabled_only: bool = True) -> List[Dict]:
+        if not self.catalog_worksheet:
+            self.ensure_tracking_schema()
+        records = self.catalog_worksheet.get_all_records()
+        catalog = []
+        seen_ids = set()
+        for row_number, record in enumerate(records, start=2):
+            enabled = self._enabled(record.get("Enabled", ""))
+            if enabled_only and not enabled:
+                continue
+            wine_id = str(record.get("Wine ID", "")).strip()
+            wine_name = str(record.get("Wine Name", "")).strip()
+            retailer = str(record.get("Retailer", "")).strip()
+            product_url = str(record.get("Product URL", "")).strip()
+            if not all((wine_id, wine_name, retailer, product_url)):
+                raise ValueError(
+                    f"Wine Catalog row {row_number} is missing Wine ID, Wine Name, "
+                    "Retailer, or Product URL"
+                )
+            if wine_id in seen_ids:
+                raise ValueError(f"Duplicate Wine ID in Wine Catalog: {wine_id}")
+            parsed = urlparse(product_url)
+            if parsed.scheme != "https" or not parsed.netloc:
+                raise ValueError(
+                    f"Wine Catalog row {row_number} has an invalid HTTPS Product URL"
+                )
+            seen_ids.add(wine_id)
+            catalog.append({
+                "row_number": row_number,
+                "wine_id": wine_id,
+                "wine_name": wine_name,
+                "retailer": retailer,
+                "product_url": product_url,
+                "expected_bottle_size": str(
+                    record.get("Expected Bottle Size", "")
+                ).strip(),
+                "enabled": enabled,
+            })
+        return catalog
+
+    def record_tracking_run(self, observations: List[Dict]) -> Dict:
+        if not self.history_worksheet or not self.catalog_worksheet:
+            self.ensure_tracking_schema()
+        history_records = self.history_worksheet.get_all_records()
+        existing_records = {
+            str(row.get("Observation ID", "")).strip(): row
+            for row in history_records
+            if str(row.get("Observation ID", "")).strip()
+        }
+        existing_ids = set(existing_records)
+        new_observations = [
+            row for row in observations
+            if row["observation_id"] not in existing_ids
+        ]
+        rows = []
+        for row in new_observations:
+            in_stock = row.get("in_stock")
+            rows.append([
+                row["observation_id"],
+                row["run_id"],
+                row["wine_id"],
+                row["wine_name"],
+                row["retailer"],
+                row.get("price_amount", ""),
+                row.get("regular_price_amount", ""),
+                row.get("currency", ""),
+                "" if in_stock is None else ("Yes" if in_stock else "No"),
+                row["source_url"],
+                row["observed_at_utc"],
+                row["status"],
+                row.get("error", ""),
+            ])
+        if rows:
+            self.history_worksheet.append_rows(
+                rows, value_input_option="USER_ENTERED"
+            )
+
+        catalog = {
+            row["wine_id"]: row for row in self.read_catalog(enabled_only=False)
+        }
+        header_index = {
+            name: index + 1 for index, name in enumerate(self.CATALOG_HEADERS)
+        }
+        updated = 0
+        cell_updates = []
+        for observation in observations:
+            persisted = existing_records.get(observation["observation_id"])
+            if persisted:
+                stock_value = str(persisted.get("In Stock", "")).strip().lower()
+                persisted_stock = (
+                    True if stock_value == "yes"
+                    else False if stock_value == "no"
+                    else None
+                )
+                observation = {
+                    **observation,
+                    "price_amount": persisted.get("Price Amount", ""),
+                    "currency": persisted.get("Currency", ""),
+                    "in_stock": persisted_stock,
+                    "observed_at_utc": persisted.get("Observed At UTC", ""),
+                    "status": persisted.get("Status", ""),
+                    "error": persisted.get("Error", ""),
+                }
+            item = catalog.get(observation["wine_id"])
+            if not item:
+                continue
+            row_number = item["row_number"]
+            in_stock = observation.get("in_stock")
+            updates = {
+                "Last Checked UTC": observation["observed_at_utc"],
+                "Status": observation["status"],
+                "Error": observation.get("error", ""),
+            }
+            if observation.get("price_amount") is not None:
+                updates["Latest Price"] = observation["price_amount"]
+                updates["Currency"] = observation.get("currency", "")
+            if in_stock is not None:
+                updates["In Stock"] = "Yes" if in_stock else "No"
+            for column, value in updates.items():
+                cell = f"{self._column_letter(header_index[column])}{row_number}"
+                cell_updates.append({
+                    "range": cell,
+                    "values": [["" if value is None else value]],
+                })
+            updated += 1
+        if cell_updates:
+            self.catalog_worksheet.batch_update(
+                cell_updates, value_input_option="USER_ENTERED"
+            )
+        return {
+            "appended": len(rows),
+            "updated": updated,
+            "skipped": len(observations) - len(rows),
+        }
+
     def add_results(self, results: List[Dict]):
         if not results:
             print("No results to add.")
             return
-        from datetime import datetime
-        now = datetime.now()
-        today = now.strftime('%Y-%m-%d')
-        scraped_at = now.strftime('%Y-%m-%d %H:%M:%S')
-        rows = [
-            [
-                r.get('query', ''),
-                r['wine'],
-                r['price'],
-                r['location'],
-                today,
-                r.get('scraped_at', scraped_at),
-                r.get('source_url', ''),
-                'Yes' if r.get('in_stock', True) else 'No',
-            ]
-            for r in results
-        ]
-        self.worksheet.append_rows(rows)
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        run_id = datetime.now(timezone.utc).strftime("manual-%Y%m%dT%H%M%SZ")
+        rows = []
+        for index, result in enumerate(results):
+            price_match = re.search(
+                r"\$\s*(\d+(?:\.\d{1,2})?)", str(result.get("price", ""))
+            )
+            observation_id = hashlib.sha256(
+                f"{run_id}\0{index}\0{result.get('source_url', '')}".encode()
+            ).hexdigest()[:24]
+            rows.append([
+                observation_id,
+                run_id,
+                result.get("query", ""),
+                result.get("wine", ""),
+                result.get("location", ""),
+                float(price_match.group(1)) if price_match else "",
+                "",
+                "AUD" if price_match else "",
+                "Yes" if result.get("in_stock", True) else "No",
+                result.get("source_url", ""),
+                now,
+                "needs_review",
+                "Legacy browser result; verify against the source URL",
+            ])
+        self.history_worksheet.append_rows(rows, value_input_option="USER_ENTERED")
         print(f"Added {len(results)} results to Google Sheet.")
 
 

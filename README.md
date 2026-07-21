@@ -7,6 +7,8 @@ An application that searches for wines on Australian wine websites and adds the 
 - 🎨 **Modern Web UI** - Beautiful, user-friendly interface
 - 🔍 **Multi-site Search** - Searches multiple Australian wine websites simultaneously
 - 📊 **Google Sheets Integration** - Automatically adds results to Google Sheets
+- 🔗 **Exact URL Tracking** - Uses the product URLs in the sheet instead of guessing from search results
+- 🧾 **Auditable History** - Records validated prices, availability, errors, and UTC timestamps
 - 📱 **Responsive Design** - Works on desktop, tablet, and mobile devices
 - ⚡ **Real-time Results** - See search results instantly
 - 🏪 **Multiple Retailers** - Supports Dan Murphy's, BWS, Liquorland, First Choice
@@ -36,7 +38,8 @@ pip install -r requirements.txt
 
 1. Follow steps 1-3 above
 2. Create OAuth 2.0 credentials instead
-3. Download the credentials and save as `credentials.json`
+3. Download the credentials and save as `client_secret.json`
+4. OAuth is for the interactive web UI. Scheduled runs should use a service account.
 
 ### 3. Configure the Application
 
@@ -47,7 +50,6 @@ cp config.example.json config.json
 
 2. Edit `config.json`:
    - Set `google_sheet_id`: Found in your Google Sheet URL (between `/d/` and `/edit`)
-   - Set `worksheet_name`: Name of the worksheet tab (default: "Wine Prices")
    - Configure `wine_sites`: List of websites to search
    - (Optional) Set `tracked_wines`: wine names used by the UI picker and monitoring endpoint
    - (Optional) Set `competitor_wines`: benchmark labels (e.g. Minuty M Provence Rosé 750mL)
@@ -117,23 +119,81 @@ python3 wine_scraper.py
 
 ## How It Works
 
-1. The script searches each configured Australian wine website
-2. Extracts wine names, prices, and retailer locations
-3. Formats the data and adds it to your Google Sheet
-4. Results are appended to the sheet with columns: **Wine**, **Price**, **Location**
-5. Rows also include **Scraped At**, **Source URL**, and **In Stock** for better history tracking.
+The scheduled harness is deterministic; it does not use AI to choose or invent a
+price.
 
-### Scheduled Monitoring (Recommended)
+1. `Wine Catalog` supplies one exact retailer product URL per enabled row.
+2. The harness validates the product name, bottle size, AUD price, package type,
+   availability, and challenge-page response.
+3. It updates the current status columns in `Wine Catalog`.
+4. It appends every success, unavailable result, review item, and error to
+   `Price History`.
 
-Run all tracked wines in one request and write results to Sheets:
+### Spreadsheet schema
+
+`Wine Catalog` is created automatically with these columns:
+
+`Wine ID`, `Wine Name`, `Retailer`, `Product URL`,
+`Expected Bottle Size`, `Enabled`, `Latest Price`, `Currency`, `In Stock`,
+`Last Checked UTC`, `Status`, `Error`
+
+Populate the first six columns. `Wine ID` must uniquely identify a
+wine-and-retailer listing, for example `miraval-rose-danmurphys`. Use `Yes` in
+`Enabled` and an absolute HTTPS product URL.
+
+`Price History` is managed by the harness:
+
+`Observation ID`, `Run ID`, `Wine ID`, `Wine Name`, `Retailer`, `Price Amount`,
+`Regular Price Amount`, `Currency`, `In Stock`, `Source URL`,
+`Observed At UTC`, `Status`, `Error`
+
+### Scheduled tracking harness
+
+Validate configuration, credentials, access, and worksheet schemas:
 
 ```bash
-curl -X POST http://localhost:5050/api/run-monitoring \
-  -H 'Content-Type: application/json' \
-  -d '{"add_to_sheet": true, "include_competitors": true}'
+python3 test_setup.py
 ```
 
-Use cron (macOS/Linux) or Task Scheduler (Windows) to call this endpoint daily.
+Run every enabled catalog row and write the results:
+
+```bash
+python3 price_tracker.py
+```
+
+For an idempotent retry, reuse the same run ID:
+
+```bash
+python3 price_tracker.py --run-id codex-2026-07-21
+```
+
+Use `--dry-run` to scrape without writing. The command writes a JSON summary to
+stdout and exits with:
+
+- `0`: at least one valid or unavailable observation was recorded
+- `2`: configuration or credentials are invalid
+- `3`: every catalog check failed or needs review
+- `4`: an unexpected fetch or Google Sheets write failure occurred
+
+The scheduled environment can provide secrets without files:
+
+- `GOOGLE_SHEET_ID`
+- `GOOGLE_SERVICE_ACCOUNT_JSON` (the complete service-account JSON)
+- or `GOOGLE_APPLICATION_CREDENTIALS` (path to the JSON file)
+
+### Codex scheduler handoff
+
+After the harness succeeds locally, configure a weekly Codex task in this
+repository with instructions equivalent to:
+
+> Run `python3 test_setup.py`, then run `python3 price_tracker.py` with a stable
+> run ID for this scheduled occurrence. Report the JSON counts and fail the task
+> when the command exits non-zero. Do not infer, replace, or manually edit any
+> price.
+
+No Flask server is required for a scheduled run. The
+`POST /api/run-monitoring` endpoint invokes the same sheet-driven service for
+interactive use.
 
 ## Troubleshooting
 
@@ -151,24 +211,16 @@ Use cron (macOS/Linux) or Task Scheduler (Windows) to call this endpoint daily.
 
 ### No results found / CAPTCHA detected
 
-**Important:** Australian wine retailer websites (Liquorland, BWS, Dan Murphy's, First Choice) use advanced bot protection (ShieldSquare CAPTCHA) that blocks automated scraping.
-
-**Possible solutions:**
-1. **Use Selenium with visible browser** - The scraper now uses Selenium, but you may need to manually solve CAPTCHAs the first time
-2. **Use a VPN/Proxy** - Sometimes changing your IP helps
-3. **Contact the websites** - They may have APIs or data feeds available
-4. **Manual data entry** - For small datasets, manual entry might be faster
-
-**Current limitations:**
-- Sites detect automated requests and show CAPTCHA pages
-- Even with Selenium, CAPTCHA solving may be required
-- This is a common issue with modern e-commerce sites
-
-**Workaround:** Try running the scraper with a visible browser window (not headless) - you may be able to solve CAPTCHAs manually when they appear.
+- CAPTCHA and challenge pages are recorded as `error`; they are never parsed as
+  prices.
+- A changed page, member-only price, case listing, currency mismatch, or bottle
+  size mismatch is recorded as `needs_review`.
+- Correct the exact URL or retailer adapter, then retry with the same run ID.
 
 ## Notes
 
 - The script includes delays between requests to be respectful to websites
 - Results are limited to the first 5 matches per website
-- Some websites may require JavaScript rendering (Selenium may be needed for those)
+- JavaScript-only or protected product pages may require a retailer-specific API
+  adapter
 - Website structures change frequently - scrapers may need periodic updates

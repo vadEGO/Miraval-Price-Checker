@@ -26,8 +26,10 @@ def test_config():
             print(f"❌ Missing required keys in config.json: {', '.join(missing_keys)}")
             return False
         
-        if config['google_sheet_id'] == 'YOUR_GOOGLE_SHEET_ID':
-            print("⚠️  Warning: Please update google_sheet_id in config.json")
+        if (config['google_sheet_id'] == 'YOUR_GOOGLE_SHEET_ID'
+                and not os.environ.get('GOOGLE_SHEET_ID', '').strip()):
+            print("❌ Please update google_sheet_id in config.json or set GOOGLE_SHEET_ID")
+            return False
         
         print("✓ Configuration file is valid")
         return True
@@ -38,28 +40,38 @@ def test_config():
         print(f"❌ Error reading config.json: {e}")
         return False
 
+def _load_service_account_credentials():
+    from google.oauth2.service_account import Credentials
+    from wine_scraper import GoogleSheetsWriter
+
+    inline_json = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '').strip()
+    if inline_json:
+        return Credentials.from_service_account_info(
+            json.loads(inline_json), scopes=GoogleSheetsWriter.SCOPES)
+    credentials_path = os.environ.get(
+        'GOOGLE_APPLICATION_CREDENTIALS', 'credentials.json')
+    return Credentials.from_service_account_file(
+        credentials_path, scopes=GoogleSheetsWriter.SCOPES)
+
+
 def test_credentials():
-    """Test if credentials.json exists"""
+    """Test service-account credentials used by the scheduled harness."""
     print("\nTesting Google credentials...")
-    
-    if not os.path.exists('credentials.json'):
-        print("❌ credentials.json not found. Please download from Google Cloud Console")
-        return False
-    
+
     try:
-        with open('credentials.json', 'r') as f:
-            creds = json.load(f)
-        
-        if 'type' not in creds:
-            print("⚠️  Warning: credentials.json format may be incorrect")
-        
-        print("✓ Credentials file found")
+        _load_service_account_credentials()
+        print("✓ Service-account credentials are valid")
         return True
+    except FileNotFoundError:
+        print(
+            "❌ Google credentials not found. Set GOOGLE_SERVICE_ACCOUNT_JSON, "
+            "GOOGLE_APPLICATION_CREDENTIALS, or add credentials.json")
+        return False
     except json.JSONDecodeError:
-        print("❌ credentials.json is not valid JSON")
+        print("❌ GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON")
         return False
     except Exception as e:
-        print(f"❌ Error reading credentials.json: {e}")
+        print(f"❌ Error reading Google credentials: {e}")
         return False
 
 def test_google_sheets_connection():
@@ -67,38 +79,27 @@ def test_google_sheets_connection():
     print("\nTesting Google Sheets connection...")
     
     try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        
+        from wine_scraper import GoogleSheetsWriter
+
         with open('config.json', 'r') as f:
             config = json.load(f)
-        
-        scope = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive'
-        ]
-        
-        creds = Credentials.from_service_account_file('credentials.json', scopes=scope)
-        client = gspread.authorize(creds)
-        
-        spreadsheet = client.open_by_key(config['google_sheet_id'])
-        worksheet_name = config.get('worksheet_name', 'Wine Prices')
-        
-        try:
-            worksheet = spreadsheet.worksheet(worksheet_name)
-            print(f"✓ Successfully connected to Google Sheet: {spreadsheet.title}")
-            print(f"✓ Worksheet '{worksheet_name}' found")
-            return True
-        except gspread.exceptions.WorksheetNotFound:
-            print(f"⚠️  Worksheet '{worksheet_name}' not found. It will be created on first run.")
-            return True
+        sheet_id = os.environ.get(
+            'GOOGLE_SHEET_ID', config.get('google_sheet_id', '')).strip()
+        writer = GoogleSheetsWriter(
+            credentials=_load_service_account_credentials(),
+            sheet_id=sheet_id,
+        )
+        writer.read_catalog(enabled_only=False)
+        print(f"✓ Successfully connected to Google Sheet: {writer.spreadsheet.title}")
+        print("✓ Wine Catalog and Price History schemas are valid")
+        return True
     except ImportError:
         print("❌ Required packages not installed. Run: pip install -r requirements.txt")
         return False
     except Exception as e:
         print(f"❌ Error connecting to Google Sheets: {e}")
         print("   Make sure:")
-        print("   1. credentials.json is valid")
+        print("   1. Service-account credentials are valid")
         print("   2. Google Sheet is shared with the service account email")
         print("   3. Google Sheets API is enabled in Google Cloud Console")
         return False

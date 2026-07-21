@@ -29,6 +29,7 @@ client_secret.json
 token.json
 _oauth_state.tmp
 config.json
+.price_tracker.lock
 
 # IDE
 .vscode/

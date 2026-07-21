@@ -151,6 +151,16 @@ def _clean_wine_list(values):
 
 
 def _configured_wine_catalog():
+    if sheets_writer and sheets_writer.catalog_worksheet:
+        rows = sheets_writer.read_catalog(enabled_only=True)
+        wines = []
+        seen = set()
+        for row in rows:
+            key = row["wine_name"].lower()
+            if key not in seen:
+                seen.add(key)
+                wines.append(row["wine_name"])
+        return wines, []
     cfg = _read_config()
     tracked = _clean_wine_list(cfg.get('tracked_wines')) or DEFAULT_WINE_CATALOG
     competitors = _clean_wine_list(cfg.get('competitor_wines')) or DEFAULT_COMPETITOR_WINES
@@ -513,8 +523,8 @@ def get_catalog():
 
 @app.route('/api/run-monitoring', methods=['POST'])
 def run_monitoring():
-    """Run the full monitoring workflow for configured wines and optionally write to Sheets."""
-    global scraper
+    """Run the deterministic, sheet-driven price tracking workflow."""
+    global scraper, sheets_writer
     try:
         if not scraper:
             init_scraper()
@@ -522,60 +532,22 @@ def run_monitoring():
             return jsonify({'error': 'Scraper not initialised. Check config.json.'}), 500
 
         payload = request.get_json(silent=True) or {}
-        wines = payload.get('wine_names')
-        include_competitors = bool(payload.get('include_competitors', True))
-        if not isinstance(wines, list) or not wines:
-            tracked_wines, competitor_wines = _configured_wine_catalog()
-            wines = tracked_wines + (competitor_wines if include_competitors else [])
-
         do_write = bool(payload.get('add_to_sheet', True))
-        results = []
-        for wine in wines:
-            if not isinstance(wine, str) or not wine.strip():
-                continue
-            selected_name = wine.strip()
-            for row in scraper.search_all_sites(selected_name):
-                results.append({
-                    **row,
-                    'query': selected_name,
-                    'scraped_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                })
+        run_id = str(payload.get('run_id', '')).strip() or None
+        if not sheets_writer:
+            _init_sheets_writer()
+        if not sheets_writer or not sheets_writer.catalog_worksheet:
+            return jsonify({
+                'success': False,
+                'error': 'Google Sheets is not connected or the tracking catalog is unavailable.',
+            }), 400
 
-        # dedupe
-        unique = []
-        dedupe_seen = set()
-        for row in results:
-            key = (
-                row.get('query', '').strip().lower(),
-                row.get('wine', '').strip().lower(),
-                row.get('price', '').strip(),
-                row.get('location', '').strip().lower(),
-            )
-            if key in dedupe_seen:
-                continue
-            dedupe_seen.add(key)
-            unique.append(row)
-
-        wrote_to_sheet = False
-        if do_write and unique:
-            if not sheets_writer:
-                _init_sheets_writer()
-            if not sheets_writer or not sheets_writer.worksheet:
-                return jsonify({
-                    'error': 'Google Sheets not connected or sheet not selected.',
-                    'searched_count': len(wines),
-                    'count': len(unique),
-                }), 400
-            sheets_writer.add_results(unique)
-            wrote_to_sheet = True
-
-        return jsonify({
-            'success': True,
-            'searched_count': len(wines),
-            'count': len(unique),
-            'wrote_to_sheet': wrote_to_sheet,
-            'results': unique,
-        })
+        from price_tracker import PriceTrackingService
+        summary = PriceTrackingService(scraper, sheets_writer).run(
+            run_id=run_id, persist=do_write
+        )
+        status_code = 200 if summary['success'] else 502
+        return jsonify(summary), status_code
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
