@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from bs4 import BeautifulSoup
 
@@ -97,8 +98,14 @@ class ProductExtractionTests(unittest.TestCase):
         self.assertEqual("needs_review", result["status"])
         self.assertIn("pack or case", result["error"])
 
-    def test_case_text_in_body_requires_review(self):
+    def test_unrelated_body_pack_mention_is_not_a_pack(self):
+        # Cross-sell/upsell copy elsewhere on the page (e.g. "buy 6 and save")
+        # must not cause a single-bottle product to be rejected as a case.
         result = self.extract(product_html(body="Price shown for 6 bottles"))
+        self.assertEqual("success", result["status"])
+
+    def test_case_price_in_title_requires_review(self):
+        result = self.extract(product_html(name="Miraval Rosé 6 bottles 750mL"))
         self.assertEqual("needs_review", result["status"])
         self.assertIn("pack or case", result["error"])
 
@@ -110,10 +117,20 @@ class ProductExtractionTests(unittest.TestCase):
         self.assertEqual("unavailable", result["status"])
         self.assertFalse(result["in_stock"])
 
-    def test_captcha_is_an_error(self):
-        result = self.extract("<html><title>CAPTCHA</title>Verify you are human</html>")
+    def test_cloudflare_challenge_is_an_error(self):
+        result = self.extract(
+            "<html><title>Attention Required! | Cloudflare</title></html>"
+        )
         self.assertEqual("error", result["status"])
         self.assertIn("bot challenge", result["error"])
+
+    def test_captcha_widget_on_real_product_page_is_not_a_challenge(self):
+        # Shopify (and others) embed a captcha bot-protection script on every
+        # normal page, including real product pages — that alone must not
+        # trigger the challenge error when structured product data is present.
+        html = product_html() + '<script id="captcha-bootstrap">true</script>'
+        result = self.extract(html)
+        self.assertEqual("success", result["status"])
 
     def test_missing_price_requires_review(self):
         result = self.extract(product_html(offers={}))
@@ -145,6 +162,12 @@ class ProductExtractionTests(unittest.TestCase):
         self.assertEqual("needs_review", result["status"])
         self.assertIn("750mL", result["error"])
 
+    def test_missing_size_assumes_standard_bottle(self):
+        # Many retailers (e.g. Shopify shops) omit the bottle size from the
+        # title entirely for their standard 750mL listing.
+        result = self.extract(product_html(name="Miraval Rosé"))
+        self.assertEqual("success", result["status"])
+
     def test_promotional_quantity_is_not_used_as_price(self):
         element = BeautifulSoup(
             '<article><h2>Miraval Rosé</h2><span class="price">6 for $90</span></article>',
@@ -166,6 +189,104 @@ class ProductExtractionTests(unittest.TestCase):
                 "Miraval Rosé 2022", "Miraval Rosé 2023 750mL"
             )
         )
+
+
+class JsonProductFetchTests(unittest.TestCase):
+    """Dan Murphy's/BWS/Jimmy Brings and Shopify product pages are rendered
+    client-side, so fetch_product_url resolves them via each site's JSON API
+    instead of HTML scraping. These exercise the real response shapes
+    captured from each API.
+    """
+
+    def setUp(self):
+        temp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump({"wine_sites": []}, temp)
+        temp.close()
+        self.config_path = temp.name
+        self.scraper = WineScraper(self.config_path)
+
+    def tearDown(self):
+        os.unlink(self.config_path)
+
+    def test_dan_murphys_member_offer_uses_single_price(self):
+        api_response = {
+            "Products": [{
+                "Description": "Miraval Cotes De Provence<br>Rose ",
+                "PackageSize": "750ML",
+                "Prices": {
+                    "singleprice": {"Value": 42.99},
+                    "promoprice": {"Value": 39.0, "IsMemberOffer": True},
+                },
+                "Inventory": {"availableinventoryqty": 25},
+            }]
+        }
+        with patch.object(self.scraper, "_get_json", return_value=api_response):
+            result = self.scraper.fetch_product_url(
+                "https://www.danmurphys.com.au/product/DM_768858/miraval-cotes-de-provence-rose",
+                "Miraval Rosé", "Dan Murphy's", "750mL",
+            )
+        self.assertEqual("success", result["status"])
+        self.assertEqual(42.99, result["price_amount"])
+        self.assertTrue(result["in_stock"])
+
+    def test_bws_special_records_was_price(self):
+        api_response = {
+            "Products": [{
+                "Name": "Miraval Cotes De Provence Rose ",
+                "PackageSize": "750ML",
+                "Price": 27, "WasPrice": 33, "IsOnSpecial": True,
+                "StockOnHand": 5, "IsAvailable": True,
+            }]
+        }
+        with patch.object(self.scraper, "_get_json", return_value=api_response):
+            result = self.scraper.fetch_product_url(
+                "https://www.bws.com.au/product/39947/miraval-studio-ros-",
+                "Miraval Rosé", "BWS", "750mL",
+            )
+        self.assertEqual("success", result["status"])
+        self.assertEqual(27, result["price_amount"])
+        self.assertEqual(33, result["regular_price_amount"])
+
+    def test_endeavour_api_failure_falls_back_to_html(self):
+        with patch.object(self.scraper, "_get_json", return_value=None), \
+             patch.object(self.scraper, "_get_page_content", return_value=""):
+            result = self.scraper.fetch_product_url(
+                "https://www.bws.com.au/product/39947/miraval-studio-ros-",
+                "Miraval Rosé", "BWS", "750mL",
+            )
+        self.assertEqual("error", result["status"])
+        self.assertEqual("Empty retailer response", result["error"])
+
+    def test_shopify_single_variant_product(self):
+        api_response = {
+            "title": "Miraval Côtes de Provence Rosé 2025",
+            "available": True,
+            "variants": [{"title": "Default Title", "price": 4499, "available": True}],
+        }
+        with patch.object(self.scraper, "_get_json", return_value=api_response):
+            result = self.scraper.fetch_product_url(
+                "https://kentstreetcellars.com.au/products/miraval-cotes-de-provence-rose-2025",
+                "Miraval Rosé", "Kent Street Cellars", "750mL",
+            )
+        self.assertEqual("success", result["status"])
+        self.assertEqual(44.99, result["price_amount"])
+
+    def test_shopify_multi_variant_product_requires_review(self):
+        api_response = {
+            "title": "Miraval Rosé 2025",
+            "available": True,
+            "variants": [
+                {"title": "750mL", "price": 5300, "available": True},
+                {"title": "1.5L", "price": 11800, "available": True},
+            ],
+        }
+        with patch.object(self.scraper, "_get_json", return_value=api_response):
+            result = self.scraper.fetch_product_url(
+                "https://www.crackawines.com.au/products/miraval-rose-2025",
+                "Miraval Rosé", "Cracka Wines", "750mL",
+            )
+        self.assertEqual("needs_review", result["status"])
+        self.assertIn("variant", result["error"])
 
 
 class FakeWorksheet:
