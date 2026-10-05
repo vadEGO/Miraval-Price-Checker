@@ -41,14 +41,12 @@ class WineScraper:
         "kentstreetcellars.com.au": {
             "label": "Kent Street Cellars",
             "search_url": "https://kentstreetcellars.com.au/search?q={query}",
-        },
-        "nicks.com.au": {
-            "label": "Nicks Wine Merchants",
-            "search_url": "https://www.nicks.com.au/search?query={query}",
+            "platform": "shopify",
         },
         "senseoftaste.com.au": {
             "label": "Sense of Taste",
             "search_url": "https://www.senseoftaste.com.au/search?type=product&q={query}",
+            "platform": "shopify",
         },
         "princewinestore.com.au": {
             "label": "Prince Wine Store",
@@ -57,6 +55,7 @@ class WineScraper:
         "differentdrop.com": {
             "label": "Different Drop",
             "search_url": "https://www.differentdrop.com/search?type=product&q={query}",
+            "platform": "shopify",
         },
         "cellarbrations.com.au": {
             "label": "Cellarbrations",
@@ -65,6 +64,7 @@ class WineScraper:
         "grandcruwineshop.com.au": {
             "label": "Grand Cru Wine Shop",
             "search_url": "https://www.grandcruwineshop.com.au/search?type=product&q={query}",
+            "platform": "shopify",
         },
         "vinomofo.com": {
             "label": "Vinomofo",
@@ -73,6 +73,7 @@ class WineScraper:
         "justwines.com.au": {
             "label": "Just Wines",
             "search_url": "https://www.justwines.com.au/search?q={query}",
+            "platform": "shopify",
         },
         "boozebud.com": {
             "label": "BoozeBud",
@@ -93,6 +94,7 @@ class WineScraper:
         "crackawines.com.au": {
             "label": "Cracka Wines",
             "search_url": "https://www.crackawines.com.au/search?q={query}",
+            "platform": "shopify",
         },
         "wine.com.au": {
             "label": "Wine.com.au",
@@ -102,17 +104,32 @@ class WineScraper:
             "label": "Qantas Wine",
             "search_url": "https://www.qantaswine.com/search?q={query}",
         },
-        "winestar.com.au": {
-            "label": "WineStar",
-            "search_url": "https://www.winestar.com.au/catalogsearch/result/?q={query}",
-        },
-        "decanterswinecellar.com.au": {
-            "label": "Decanters Wine Cellar",
-            "search_url": "https://www.decanterswinecellar.com.au/search?type=product&q={query}",
-        },
         "winepeople.com.au": {
             "label": "Wine People",
             "search_url": "https://www.winepeople.com.au/search?q={query}",
+        },
+    }
+
+    # Dan Murphy's, BWS, and Jimmy Brings render product pages client-side (no
+    # price in the HTML), so tracked product URLs are resolved via their JSON
+    # product API instead of HTML scraping. All three brands share the
+    # Endeavour Group backend; the "shape" distinguishes the DM response schema
+    # from the BWS/Jimmy Brings one.
+    _ENDEAVOUR_HOSTS = {
+        "www.danmurphys.com.au": {
+            "api": "https://api.danmurphys.com.au/apis/ui/Product/{code}",
+            "origin": "https://www.danmurphys.com.au",
+            "shape": "dm",
+        },
+        "www.bws.com.au": {
+            "api": "https://api.bws.com.au/apis/ui/Product/{code}",
+            "origin": "https://www.bws.com.au",
+            "shape": "bws",
+        },
+        "www.jimmybrings.com.au": {
+            "api": "https://api.bws.com.au/apis/ui/Product/{code}",
+            "origin": "https://www.jimmybrings.com.au",
+            "shape": "bws",
         },
     }
 
@@ -473,9 +490,10 @@ class WineScraper:
         return self._search_endeavour_api(wine_name, 'jimmybrings')
 
     def search_vintage_cellars(self, wine_name: str) -> List[Dict]:
-        """Search Vintage Cellars using their search page."""
-        url = f"https://www.vintagecellars.com.au/search?q={quote_plus(wine_name)}"
-        return self._scrape_html_site(url, 'Vintage Cellars', wine_name)
+        """Search Vintage Cellars via its internal JSON search API."""
+        return self._search_coles_liquor(
+            'www.vintagecellars.com.au', 'vc', 'Vintage Cellars', wine_name
+        )
 
     # ── HTML scraping (Kent Street Cellars, Liquorland, First Choice) ───
 
@@ -530,10 +548,23 @@ class WineScraper:
             print(f"    ✗ {self._last_fetch_error}")
         return content
 
+    # Deliberately excludes a bare "captcha" — Shopify and other legitimate
+    # storefronts embed captcha bot-protection scripts on normal product pages,
+    # which made every real page look like a challenge. These markers are only
+    # checked when no structured product data was found (see extract_product_page).
     _CHALLENGE_MARKERS = (
-        "captcha", "access denied", "verify you are human", "cf-chl-",
+        "access denied", "verify you are human", "cf-chl-",
         "attention required! | cloudflare",
         "perimeterx", "shieldsquare", "bot detection", "security challenge",
+    )
+
+    # Matches multi-bottle listings so they aren't mistaken for a single-bottle
+    # price. Covers "Case of 6", "6pk"/"6-pack"/"6 pack", "12 bottles", "Pack of
+    # 6", and "6 x 750ml". Shared by the HTML/API tail validation and the
+    # Shopify search filter, so both reject the same titles.
+    _PACK_PATTERN = (
+        r"\b(case|dozen|pack\s+of\s+\d+|\d+\s*-?\s*(?:pk|pack)|\d+\s+bottles?|"
+        r"\d+\s*x\s*\d+\s*(?:ml|cl|l))\b"
     )
 
     @staticmethod
@@ -567,15 +598,8 @@ class WineScraper:
             "status": "needs_review",
             "error": "",
         }
-        lowered = (html or "").lower()
         if not html:
             return {**base, "status": "error", "error": "Empty retailer response"}
-        if any(marker in lowered for marker in self._CHALLENGE_MARKERS):
-            return {
-                **base,
-                "status": "error",
-                "error": "Retailer returned a bot challenge instead of a product page",
-            }
 
         soup = BeautifulSoup(html, "html.parser")
         product_nodes = []
@@ -589,6 +613,17 @@ class WineScraper:
                         product_nodes.append(node)
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
+
+        # Only treat challenge markers as fatal when no structured product data
+        # was found — a real product page can legitimately embed a captcha
+        # bot-protection widget without actually challenging this request.
+        lowered = html.lower()
+        if not product_nodes and any(marker in lowered for marker in self._CHALLENGE_MARKERS):
+            return {
+                **base,
+                "status": "error",
+                "error": "Retailer returned a bot challenge instead of a product page",
+            }
 
         matching_nodes = [
             node for node in product_nodes
@@ -679,32 +714,6 @@ class WineScraper:
             base["currency"] = currency or ("AUD" if explicit_dollar_price else "")
 
         page_text = soup.get_text(" ", strip=True)
-        combined_identity = f"{product_name} {page_text[:5000]}"
-        expected_ml = self._size_in_ml(expected_bottle_size)
-        observed_sizes = {
-            self._size_in_ml(match.group(0))
-            for match in re.finditer(r"\d+(?:\.\d+)?\s*(?:ml|cl|l)\b", combined_identity, re.I)
-        }
-        observed_sizes.discard(None)
-        if expected_ml and expected_ml not in observed_sizes:
-            base["error"] = (
-                f"Expected {expected_bottle_size}, but that bottle size was not "
-                "confirmed on the product page"
-            )
-            return base
-
-        pack_pattern = (
-            r"\b(case|dozen|pack\s+of\s+\d+|\d+\s*pk|\d+\s+bottles?|"
-            r"\d+\s*x\s*\d+\s*(?:ml|cl|l))\b"
-        )
-        if re.search(pack_pattern, f"{product_name} {page_text[:5000]}", re.I):
-            base["error"] = "Product appears to be a multi-bottle pack or case"
-            return base
-
-        if wine_name and product_name and not self._is_relevant_match(wine_name, product_name):
-            base["error"] = "Product title does not match the catalog wine name"
-            return base
-
         if availability_text.strip():
             normalized_availability = availability_text.replace("/", "")
             out_of_stock = "outofstock" in normalized_availability
@@ -717,9 +726,48 @@ class WineScraper:
                 re.search(r"\b(in stock|available now)\b", page_text, re.I)
             )
         base["in_stock"] = False if out_of_stock else (True if in_stock else None)
-
         if out_of_stock:
             base["status"] = "unavailable"
+
+        return self._finalize_observation(base, product_name, wine_name, expected_bottle_size)
+
+    def _finalize_observation(self, base: Dict, product_name: str, wine_name: str,
+                              expected_bottle_size: str) -> Dict:
+        """Apply the validation rules shared by every product data source:
+        name presence, bottle size, multi-bottle packs, catalog name match, and
+        the final AUD price / stock / status checks. `base` must already have
+        price_amount, regular_price_amount, currency, in_stock, and status
+        ("unavailable" if known out of stock) populated by the caller.
+        """
+        base["product_name"] = (product_name or "")[:200]
+        if not product_name:
+            base["error"] = "No product title could be validated"
+            return base
+
+        expected_ml = self._size_in_ml(expected_bottle_size)
+        observed_sizes = {
+            self._size_in_ml(match.group(0))
+            for match in re.finditer(r"\d+(?:\.\d+)?\s*(?:ml|cl|l)\b", product_name, re.I)
+        }
+        observed_sizes.discard(None)
+        if expected_ml and expected_ml not in observed_sizes:
+            # A title with no size at all is assumed to be a standard 750mL bottle.
+            if not (expected_ml == 750 and not observed_sizes):
+                base["error"] = (
+                    f"Expected {expected_bottle_size}, but that bottle size was not "
+                    "confirmed on the product page"
+                )
+                return base
+
+        if re.search(self._PACK_PATTERN, product_name, re.I):
+            base["error"] = "Product appears to be a multi-bottle pack or case"
+            return base
+
+        if wine_name and not self._is_relevant_match(wine_name, product_name):
+            base["error"] = "Product title does not match the catalog wine name"
+            return base
+
+        if base["status"] == "unavailable":
             return base
         if base["price_amount"] is None:
             base["error"] = "No explicit product price could be validated"
@@ -733,6 +781,131 @@ class WineScraper:
 
         base["status"] = "success"
         return base
+
+    def _get_json(self, url: str, headers: Dict, params: Optional[Dict] = None) -> Optional[Dict]:
+        """GET a JSON endpoint, returning None on any failure (caller falls back)."""
+        try:
+            if CURL_CFFI_AVAILABLE:
+                response = cffi_requests.get(
+                    url, headers=headers, params=params, timeout=15, impersonate="chrome"
+                )
+            else:
+                response = requests.get(url, headers=headers, params=params, timeout=15)
+            if response.status_code != 200:
+                return None
+            return response.json()
+        except Exception:
+            return None
+
+    def _fetch_endeavour_product(self, host: str, path: str, wine_name: str,
+                                 expected_bottle_size: str) -> Optional[Dict]:
+        """Fetch a Dan Murphy's / BWS / Jimmy Brings product via its JSON API.
+
+        These sites render product pages client-side, so the HTML has no
+        price. Returns None (caller falls back to HTML scraping) if the
+        stockcode can't be parsed from the URL or the API call fails.
+        """
+        config = self._ENDEAVOUR_HOSTS.get(host)
+        match = re.search(r"/product/(?:[A-Za-z]+_)?(\d+)", path)
+        if not config or not match:
+            return None
+
+        headers = {
+            'User-Agent': self.headers['User-Agent'],
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-AU,en;q=0.9',
+            'Origin': config['origin'],
+            'Referer': f"{config['origin']}/",
+        }
+        data = self._get_json(config['api'].format(code=match.group(1)), headers)
+        products = data.get('Products') if isinstance(data, dict) else None
+        product = products[0] if products else None
+        if not product:
+            return None
+
+        base = {
+            "product_name": "", "price_amount": None, "regular_price_amount": None,
+            "currency": "AUD", "in_stock": None, "status": "needs_review", "error": "",
+        }
+        package_size = str(product.get("PackageSize", "")).strip()
+
+        if config['shape'] == 'dm':
+            name = re.sub(r"<br\s*/?>", " ", str(product.get("Description", "")))
+            prices = product.get("Prices") or {}
+            single = prices.get("singleprice") or {}
+            promo = prices.get("promoprice") or {}
+            price_amount = single.get("Value")
+            regular_amount = None
+            if (price_amount is not None and promo.get("Value") is not None
+                    and not promo.get("IsMemberOffer") and promo["Value"] < price_amount):
+                regular_amount = price_amount
+                price_amount = promo["Value"]
+            inventory = product.get("Inventory") or {}
+            stock_qty = (inventory.get("availableinventoryqty")
+                         or inventory.get("backorderavailableinventoryqty") or 0)
+            in_stock = bool(stock_qty)
+        else:  # bws / jimmybrings
+            name = str(product.get("Name", ""))
+            price_amount = product.get("Price")
+            was_price = product.get("WasPrice")
+            regular_amount = (
+                was_price if product.get("IsOnSpecial") and was_price and price_amount
+                and was_price > price_amount else None
+            )
+            stock = product.get("StockOnHand") or product.get("BackorderStockOnHand") or 0
+            in_stock = bool(stock) or bool(product.get("IsAvailable"))
+
+        name = re.sub(r"\s+", " ", name).strip()
+        if package_size and package_size.lower() not in name.lower():
+            product_name = f"{name} {package_size}".strip()
+        else:
+            product_name = name
+
+        base["price_amount"] = price_amount
+        base["regular_price_amount"] = regular_amount
+        base["in_stock"] = in_stock
+        if not in_stock:
+            base["status"] = "unavailable"
+
+        return self._finalize_observation(base, product_name, wine_name, expected_bottle_size)
+
+    def _fetch_shopify_product(self, url: str, wine_name: str,
+                               expected_bottle_size: str) -> Optional[Dict]:
+        """Fetch a Shopify product via its JSON endpoint (<handle>.js).
+
+        Returns None (caller falls back to HTML scraping) if the URL isn't a
+        Shopify product page or the JSON endpoint doesn't respond.
+        """
+        match = re.match(r"(.*/products/[^/?#]+)", url)
+        if not match:
+            return None
+        data = self._get_json(f"{match.group(1)}.js", {
+            'User-Agent': self.headers['User-Agent'],
+            'Accept': 'application/json',
+        })
+        if not isinstance(data, dict) or not data.get('title'):
+            return None
+
+        base = {
+            "product_name": "", "price_amount": None, "regular_price_amount": None,
+            "currency": "AUD", "in_stock": None, "status": "needs_review", "error": "",
+        }
+        title = str(data.get('title', '')).strip()
+        variants = [v for v in data.get('variants', []) if isinstance(v, dict)]
+        if len(variants) > 1:
+            base["product_name"] = title[:200]
+            base["error"] = "Multiple product variants; price could not be isolated"
+            return base
+
+        variant = variants[0] if variants else {}
+        price_cents = variant.get('price')
+        if isinstance(price_cents, (int, float)):
+            base["price_amount"] = round(price_cents / 100, 2)
+        base["in_stock"] = bool(variant.get('available', data.get('available')))
+        if not base["in_stock"]:
+            base["status"] = "unavailable"
+
+        return self._finalize_observation(base, title, wine_name, expected_bottle_size)
 
     def fetch_product_url(self, url: str, wine_name: str, retailer: str,
                           expected_bottle_size: str = "") -> Dict:
@@ -748,6 +921,18 @@ class WineScraper:
                 "status": "error",
                 "error": "Product URL must be an absolute HTTPS URL",
             }
+
+        host = parsed.netloc.lower()
+        result = None
+        if host in self._ENDEAVOUR_HOSTS:
+            result = self._fetch_endeavour_product(
+                host, parsed.path, wine_name, expected_bottle_size
+            )
+        elif re.search(r"/products/[^/?#]+", parsed.path):
+            result = self._fetch_shopify_product(url, wine_name, expected_bottle_size)
+        if result is not None:
+            return result
+
         html = self._get_page_content(url)
         result = self.extract_product_page(
             html or "", url, wine_name, retailer, expected_bottle_size
@@ -906,21 +1091,125 @@ class WineScraper:
 
         return results[:5]
 
+    def _search_coles_liquor(self, host: str, brand: str, label: str,
+                             wine_name: str) -> List[Dict]:
+        """Search a Coles Liquor Group storefront (Liquorland, Vintage Cellars)
+        via its internal JSON search API. The HTML page is a client-rendered
+        shell with no product data, and the API requires session cookies from
+        a prior page load before it accepts requests.
+        """
+        results = []
+        try:
+            session = (cffi_requests.Session(impersonate='chrome') if CURL_CFFI_AVAILABLE
+                       else requests.Session())
+            session.get(f"https://{host}/", headers=self.headers, timeout=15)
+            response = session.get(
+                f"https://{host}/api/search/{brand}/nsw",
+                params={'q': wine_name, 'facets': ''},
+                headers={
+                    'Accept': 'application/json',
+                    'Referer': f"https://{host}/search?q={quote_plus(wine_name)}",
+                },
+                timeout=15,
+            )
+            if response.status_code != 200:
+                print(f"    ⚠ {label} API returned HTTP {response.status_code}")
+                return results
+            data = response.json()
+        except Exception as e:
+            print(f"    ✗ {label} API error: {e}")
+            return results
+
+        for product in (data.get('products') or [])[:20]:
+            name = str(product.get('name', '')).strip()
+            price_info = product.get('price') or {}
+            current = price_info.get('current')
+            if not name or not current:
+                continue
+            if not self._is_relevant_match(wine_name, name):
+                continue
+
+            price_str = f"${current:.2f}"
+            member = price_info.get('memberOnlyPrice')
+            if member and member < current:
+                price_str += f" (member ${member:.2f})"
+            in_stock = str((product.get('stock') or {}).get('delivery', '')).lower() == 'in stock'
+            if not in_stock:
+                price_str += " [Out of Stock]"
+
+            slug = product.get('productUrl', '')
+            source_url = f"https://{host}{slug}" if slug else (
+                f"https://{host}/search?q={quote_plus(wine_name)}"
+            )
+            results.append({
+                'wine': name,
+                'price': price_str,
+                'location': label,
+                'source_url': source_url,
+                'in_stock': in_stock,
+            })
+            if len(results) >= 5:
+                break
+        return results
+
     def search_liquorland(self, wine_name: str) -> List[Dict]:
-        """Search Liquorland website."""
-        url = f"https://www.liquorland.com.au/search?q={quote_plus(wine_name)}"
-        return self._scrape_html_site(url, 'Liquorland', wine_name)
+        """Search Liquorland via its internal JSON search API."""
+        return self._search_coles_liquor('www.liquorland.com.au', 'll', 'Liquorland', wine_name)
 
     def search_first_choice(self, wine_name: str) -> List[Dict]:
         """Search First Choice website."""
         url = f"https://www.firstchoice.com.au/search?q={quote_plus(wine_name)}"
         return self._scrape_html_site(url, 'First Choice', wine_name)
 
+    def _search_shopify(self, host: str, label: str, wine_name: str) -> List[Dict]:
+        """Search a Shopify storefront via its predictive-search JSON endpoint."""
+        data = self._get_json(
+            f"https://{host}/search/suggest.json",
+            {'User-Agent': self.headers['User-Agent'], 'Accept': 'application/json'},
+            params={'q': wine_name, 'resources[type]': 'product', 'resources[limit]': 10},
+        )
+        products = (((data or {}).get('resources') or {}).get('results') or {}).get('products') or []
+
+        results = []
+        for product in products:
+            title = str(product.get('title', '')).strip()
+            if not title or not self._is_relevant_match(wine_name, title):
+                continue
+            if re.search(self._PACK_PATTERN, title, re.I):
+                continue
+            size_ml = {
+                self._size_in_ml(m.group(0))
+                for m in re.finditer(r"\d+(?:\.\d+)?\s*(?:ml|cl|l)\b", title, re.I)
+            }
+            size_ml.discard(None)
+            if size_ml and 750 not in size_ml:
+                continue
+            try:
+                price = float(product.get('price'))
+            except (TypeError, ValueError):
+                continue
+
+            url = product.get('url', '')
+            if url.startswith('/'):
+                url = f"https://{host}{url}"
+            results.append({
+                'wine': title[:200],
+                'price': f"${price:.2f}",
+                'location': label,
+                'source_url': url,
+                'in_stock': bool(product.get('available', True)),
+            })
+            if len(results) >= 5:
+                break
+        return results
+
     def search_independent_site(self, wine_name: str, site_key: str) -> List[Dict]:
         """Search an independent retailer site using configured URL pattern."""
         config = self.INDEPENDENT_SITE_CONFIG.get(site_key)
         if not config:
             return []
+        if config.get("platform") == "shopify":
+            return self._search_shopify(site_key, config["label"], wine_name)
         url = config["search_url"].format(query=quote_plus(wine_name))
         return self._scrape_html_site(url, config["label"], wine_name)
 
