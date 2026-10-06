@@ -183,6 +183,17 @@ class ProductExtractionTests(unittest.TestCase):
             self.scraper._is_relevant_match("Miraval Rosé", "Miraval Studio Rosé")
         )
 
+    def test_studio_query_does_not_match_plain_miraval(self):
+        self.assertFalse(
+            self.scraper._is_relevant_match("Studio Rosé by Miraval", "Miraval Rosé 2025")
+        )
+        self.assertTrue(
+            self.scraper._is_relevant_match("Studio Rosé by Miraval", "Studio by Miraval Rosé 2025")
+        )
+        self.assertTrue(
+            self.scraper._is_relevant_match("Studio Rosé by Miraval", "Miraval Studio Rosé")
+        )
+
     def test_requested_vintage_must_match(self):
         self.assertFalse(
             self.scraper._is_relevant_match(
@@ -454,3 +465,59 @@ class TrackingServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SeedCatalogTests(unittest.TestCase):
+    def plan(self, results_by_wine, existing_ids=(), existing_urls=()):
+        from seed_catalog import plan_catalog_rows
+        return plan_catalog_rows(
+            list(results_by_wine),
+            lambda wine: results_by_wine[wine],
+            lambda url: "/product/" in url or "/products/" in url,
+            set(existing_ids),
+            set(existing_urls),
+        )
+
+    def test_adds_one_row_per_supported_retailer_and_strips_tracking_params(self):
+        rows, skipped = self.plan({"Miraval Rosé": [
+            {"location": "Kent Street Cellars",
+             "source_url": "https://kent.example/products/miraval?_pos=1&_psq=x"},
+            {"location": "Liquorland",
+             "source_url": "https://www.liquorland.example/rose/miraval_1"},
+        ]})
+        self.assertEqual([[
+            "miraval-rose-kent-street-cellars", "Miraval Rosé",
+            "Kent Street Cellars", "https://kent.example/products/miraval",
+            "750mL", "Yes",
+        ]], rows)
+        self.assertEqual([], skipped)
+
+    def test_existing_rows_are_not_duplicated(self):
+        results = {"Miraval Rosé": [
+            {"location": "BWS", "source_url": "https://bws.example/product/1/miraval"},
+        ]}
+        rows, skipped = self.plan(results, existing_ids={"miraval-rose-bws"})
+        self.assertEqual([], rows)
+        self.assertEqual("already in catalog", skipped[0]["reason"])
+        rows, _ = self.plan(results, existing_urls={"https://bws.example/product/1/miraval"})
+        self.assertEqual([], rows)
+
+    def test_multiple_products_at_one_retailer_are_ambiguous(self):
+        rows, skipped = self.plan({"Miraval Rosé": [
+            {"location": "Cracka Wines", "source_url": "https://c.example/products/a"},
+            {"location": "Cracka Wines", "source_url": "https://c.example/products/b"},
+        ]})
+        self.assertEqual([], rows)
+        self.assertIn("ambiguous", skipped[0]["reason"])
+        self.assertEqual(2, len(skipped[0]["candidates"]))
+
+    def test_scraper_url_support(self):
+        scraper = WineScraper.__new__(WineScraper)
+        self.assertTrue(scraper.supports_product_url(
+            "https://www.danmurphys.com.au/product/DM_768858/miraval"))
+        self.assertTrue(scraper.supports_product_url(
+            "https://kentstreetcellars.com.au/products/miraval-rose-2025"))
+        self.assertFalse(scraper.supports_product_url(
+            "https://www.liquorland.com.au/rose/miraval_2091007"))
+        self.assertFalse(scraper.supports_product_url(
+            "https://www.danmurphys.com.au/buy/search-results/q=miraval"))

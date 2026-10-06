@@ -165,6 +165,10 @@ class WineScraper:
         'blanc', 'rouge', 'rose', 'rosé', 'red', 'white', 'pink',
     }
 
+    # Product-line words that distinguish one wine from another by the same
+    # producer; if the query has one, the candidate must have it too.
+    _LINE_WORDS = {'studio'}
+
     def _normalize_text(self, text: str) -> str:
         """Normalize text for robust matching (accents/case/punctuation)."""
         if not text:
@@ -214,6 +218,13 @@ class WineScraper:
                 if not any(c in candidate_tokens_set for c in query_colours):
                     return False
             # else: candidate has no colour word at all — allow through (checked by token overlap)
+
+        # --- Hard rule: product-line words must match if present ---
+        # "Studio Rosé by Miraval" is a different wine from "Miraval Rosé", but
+        # majority overlap alone would accept the latter for the former.
+        candidate_token_set = set(candidate.split())
+        if any(t in self._LINE_WORDS and t not in candidate_token_set for t in query_tokens):
+            return False
 
         # --- Token overlap scoring ---
         meaningful_tokens = [t for t in query_tokens if t not in self._FILLER_WORDS]
@@ -906,6 +917,19 @@ class WineScraper:
             base["status"] = "unavailable"
 
         return self._finalize_observation(base, title, wine_name, expected_bottle_size)
+
+    def supports_product_url(self, url: str) -> bool:
+        """True if fetch_product_url can read this URL through a JSON API.
+
+        Other retailers fall back to HTML scraping, which only works when the
+        page embeds structured product data, so they are not auto-seeded.
+        """
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            return False
+        if parsed.netloc.lower() in self._ENDEAVOUR_HOSTS:
+            return bool(re.search(r"/product/(?:[A-Za-z]+_)?\d+", parsed.path))
+        return bool(re.search(r"/products/[^/?#]+", parsed.path))
 
     def fetch_product_url(self, url: str, wine_name: str, retailer: str,
                           expected_bottle_size: str = "") -> Dict:

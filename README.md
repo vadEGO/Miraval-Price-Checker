@@ -147,6 +147,13 @@ wine-and-retailer listing, for example `miraval-rose-danmurphys`. Use `Yes` in
 `Regular Price Amount`, `Currency`, `In Stock`, `Source URL`,
 `Observed At UTC`, `Status`, `Error`
 
+### Running on a schedule with Codex
+
+See [CODEX.md](CODEX.md) for the one-time Google setup, the first-run prompt, and
+the weekly prompt. `scripts/codex_setup.sh` prepares the environment and
+`seed_catalog.py` fills the `Wine Catalog` sheet with product URLs on the first
+run. Standing rules for agents are in [AGENTS.md](AGENTS.md).
+
 ### Scheduled tracking harness
 
 Validate configuration, credentials, access, and worksheet schemas:
